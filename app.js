@@ -37,7 +37,6 @@ const SETTINGS = {
   // === Dynamic scale-invariant geometry ===
   pinchMaxPalmRatio: .25,
   pinchSideOnPalmRatio: .18,
-  pinchReleasePalmRatio: .34,
   pinchMinOrientation: .28,
 
   // Normalized by PalmScale per second. Only blocks DRAW entry.
@@ -684,8 +683,38 @@ function updateGestureState(result, now) {
     return;
   }
 
+  const maintainRatio = windowRatio(currentState, false);
+
+  // Seamless handoff: if a competing gesture has already satisfied the full
+  // entry window and the current gesture is below its 30% maintain threshold,
+  // end the old state and start the new one in the same frame.
+  if (
+    result.name !== currentState &&
+    result.name !== "IDLE" &&
+    maintainRatio < SETTINGS.gestureMaintainRatio
+  ) {
+    const entryRatio = result.sideOn
+      ? SETTINGS.sideOnEnterRatio
+      : SETTINGS.gestureEnterRatio;
+
+    if (windowRatio(result.name, true) >= entryRatio) {
+      const ended = currentState;
+      onEnd(ended);
+      currentState = result.name;
+      onStart(currentState);
+      gestureWindow = [{
+        name: result.name,
+        score: result.score,
+        margin: result.margin,
+        sideOn: Boolean(result.sideOn),
+        t: now,
+      }];
+      return;
+    }
+  }
+
   // Schmitt-style maintain gate: once active, only <30% releases it.
-  if (windowRatio(currentState, false) < SETTINGS.gestureMaintainRatio) {
+  if (maintainRatio < SETTINGS.gestureMaintainRatio) {
     const ended = currentState;
     onEnd(ended);
     currentState = "IDLE";
@@ -1361,7 +1390,7 @@ function processVideo(now) {
   try {
     const result = landmarker.detectForVideo(video, now);
     const rawImageHand = result.landmarks?.[0] || null;
-    const rawWorldHand = result.worldLandmarks?.[0] || rawImageHand;
+    const rawWorldHand = result.worldLandmarks?.[0] || null;
 
     if (rawImageHand) {
       latestHand = smoothLandmarks(rawImageHand, now, imageLandmarkFilters);
@@ -1369,7 +1398,11 @@ function processVideo(now) {
         ? smoothLandmarks(rawWorldHand, now, worldLandmarkFilters)
         : null;
 
-      updateIndexWorldSpeed(latestWorldHand, now);
+      if (latestWorldHand) {
+        updateIndexWorldSpeed(latestWorldHand, now);
+      } else {
+        updateIndexWorldSpeed(null, now);
+      }
     } else {
       latestHand = null;
       latestWorldHand = null;
