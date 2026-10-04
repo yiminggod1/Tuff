@@ -368,54 +368,107 @@ function fingerFlags(hand) {
   };
 }
 
-function pinchRatio(hand) {
-  return dist(hand[4], hand[8]) / Math.max(.0001, dist(hand[0], hand[9]));
+function palmScale(hand) {
+  return Math.max(.0001, dist(hand[0], hand[9]));
+}
+
+function palmNormal(hand) {
+  const a = sub3(hand[5], hand[0]);
+  const b = sub3(hand[17], hand[0]);
+  return normalize3(cross3(a, b));
 }
 
 function palmOrientationScore(hand) {
   if (!hand || hand.length !== 21) return 0;
-
-  const across = normalize3(sub3(hand[17], hand[5]));
-  const towardMiddle = normalize3(sub3(hand[9], hand[0]));
-  const normal = normalize3(cross3(across, towardMiddle));
+  const normal = palmNormal(hand);
   if (!norm3(normal)) return 0;
-
-  // MediaPipe world landmarks are used for depth-aware geometry. We care
-  // about the magnitude of the palm normal along the camera/depth axis;
-  // either normal direction is valid because the hand may be mirrored.
   return clamp01(Math.abs(dot3(normal, { x: 0, y: 0, z: 1 })));
+}
+
+function isSideOnHand(hand) {
+  return palmOrientationScore(hand) < .45;
 }
 
 function angleBendScore(angle, openAngle = 170, bendAngle = 105) {
   return clamp01((openAngle - angle) / (openAngle - bendAngle));
 }
 
+function fingerFoldbackScore(hand, mcp, pip, dip, tip) {
+  const scale = palmScale(hand);
+  const axis = normalize3(sub3(hand[pip], hand[mcp]));
+  const tipFromPip = sub3(hand[tip], hand[pip]);
+
+  // 用手指自己的軸，而不是固定 camera-Y，判斷指尖是否折回 PIP。
+  const foldback = dot3(tipFromPip, axis);
+  const foldbackScore = clamp01(
+    (-foldback) / Math.max(.025, scale * .20)
+  );
+
+  const pipAngle = jointAngle(hand[mcp], hand[pip], hand[dip]);
+  const dipAngle = jointAngle(hand[pip], hand[dip], hand[tip]);
+
+  const angleScore =
+    angleBendScore(pipAngle, 170, 118) * .55 +
+    angleBendScore(dipAngle, 174, 120) * .45;
+
+  return clamp01(foldbackScore * .42 + angleScore * .58);
+}
+
 function pinchConfidence(hand) {
-  const ratio = pinchRatio(hand);
-  const tipScore = clamp01((.62 - ratio) / .24);
+  const scale = palmScale(hand);
+  const ratio = dist(hand[4], hand[8]) / scale;
+  const sideOn = isSideOnHand(hand);
+  const ratioLimit = sideOn
+    ? SETTINGS.pinchSideOnPalmRatio
+    : SETTINGS.pinchMaxPalmRatio;
 
-  const thumbAngle = jointAngle(hand[2], hand[3], hand[4]);
-  const indexPipAngle = jointAngle(hand[5], hand[6], hand[7]);
-  const indexDipAngle = jointAngle(hand[6], hand[7], hand[8]);
+  // 完全動態比例：4↔8 距離只相對於 0↔9 PalmScale。
+  const tipScore = clamp01(
+    (ratioLimit - ratio) / Math.max(.03, ratioLimit * .58)
+  );
 
-  const thumbBend = angleBendScore(thumbAngle, 164, 112);
-  const indexBend = angleBendScore(indexPipAngle, 175, 115);
-  const indexDipBend = angleBendScore(indexDipAngle, 174, 122);
+  const thumbBend = angleBendScore(
+    jointAngle(hand[2], hand[3], hand[4]), 165, 112
+  );
+  const indexBend = angleBendScore(
+    jointAngle(hand[5], hand[6], hand[7]), 175, 112
+  );
+  const indexDipBend = angleBendScore(
+    jointAngle(hand[6], hand[7], hand[8]), 174, 118
+  );
+
+  const middleFolded = fingerFoldbackScore(hand, 9, 10, 11, 12);
+  const ringFolded = fingerFoldbackScore(hand, 13, 14, 15, 16);
+  const pinkyFolded = fingerFoldbackScore(hand, 17, 18, 19, 20);
+
+  const otherFingers = Math.min(middleFolded, ringFolded, pinkyFolded);
   const orientation = palmOrientationScore(hand);
 
-  // Tip distance alone is not enough. A valid pinch needs the thumb/index
-  // chains to be approaching each other, plus a plausible palm orientation.
-  const geometryScore =
-    thumbBend * .34 +
-    indexBend * .28 +
-    indexDipBend * .16 +
-    orientation * .22;
+  const orientationFactor =
+    orientation < SETTINGS.pinchMinOrientation
+      ? .44
+      : .70 + .30 * clamp01(
+          (orientation - SETTINGS.pinchMinOrientation) /
+          (.45 - SETTINGS.pinchMinOrientation)
+        );
 
-  if (orientation < .22 || thumbBend < .08 || indexBend < .08) {
-    return clamp01(tipScore * .38);
+  if (
+    tipScore <= 0 ||
+    thumbBend < .08 ||
+    indexBend < .10 ||
+    otherFingers < .50
+  ) {
+    return 0;
   }
 
-  return clamp01(tipScore * (.58 + geometryScore * .42));
+  const chainScore =
+    thumbBend * .25 +
+    indexBend * .24 +
+    indexDipBend * .16 +
+    otherFingers * .20 +
+    orientationFactor * .15;
+
+  return clamp01(tipScore * chainScore * orientationFactor);
 }
 
 function classifyGesture(hand, motionSpeed = indexSpeed) {
@@ -478,10 +531,7 @@ function classifyGesture(hand, motionSpeed = indexSpeed) {
     { name: "TRACK", score: trackScore },
   ];
 
-  const ranked = generic.map(item => ({
-    name: item.name,
-    score: personalizedScore(hand, item.name, item.score),
-  })).sort((a, b) => b.score - a.score);
+  const ranked = generic.sort((a, b) => b.score - a.score);
 
   const best = ranked[0];
   const second = ranked[1];
@@ -510,26 +560,20 @@ function classifyGesture(hand, motionSpeed = indexSpeed) {
     };
   }
 
-  const bestProfile = calibrationProfile[best.name];
-  const bestProfileShape = bestProfile ? poseSimilarity(hand, bestProfile.template) : 0;
-
-  if (
-    best.name === "DRAW" &&
-    !drawQualified &&
-    !(bestProfile && bestProfileShape >= .78 && generic.find(item => item.name === "DRAW")?.score >= .42)
-  ) {
-    return { name: "IDLE", score: best.score, margin: best.score - second.score };
+  if (best.name === "DRAW" && !drawQualified) {
+    return { name: "IDLE", score: best.score, margin: best.score - second.score, sideOn };
   }
 
-  if (
-    best.name === "DELETE" &&
-    !deleteQualified &&
-    !(bestProfile && bestProfileShape >= .78 && generic.find(item => item.name === "DELETE")?.score >= .42)
-  ) {
-    return { name: "IDLE", score: best.score, margin: best.score - second.score };
+  if (best.name === "DELETE" && !deleteQualified) {
+    return { name: "IDLE", score: best.score, margin: best.score - second.score, sideOn };
   }
 
-  return { name: best.name, score: best.score, margin: best.score - second.score };
+  return {
+    name: best.name,
+    score: best.score,
+    margin: best.score - second.score,
+    sideOn,
+  };
 }
 let gestureEvidence = [];
 
