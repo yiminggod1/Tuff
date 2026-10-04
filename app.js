@@ -172,9 +172,7 @@ function smoothLandmarks(points, nowMs, filterBank) {
   }));
 }
 
-let stableGesture = "IDLE";
-let gestureCandidate = "IDLE";
-let gestureCandidateAt = 0;
+let currentState = "IDLE";
 let pinchActive = false;
 
 let rawPoint = null;
@@ -471,9 +469,10 @@ function pinchConfidence(hand) {
   return clamp01(tipScore * chainScore * orientationFactor);
 }
 
-function classifyGesture(hand, motionSpeed = indexSpeed) {
+function classifyGesture(hand, motionSpeed = indexWorldSpeed) {
   const f = fingerFlags(hand);
   const pinch = pinchConfidence(hand);
+  const sideOn = isSideOnHand(hand);
 
   const otherExtendedForIndex = Math.max(
     f.middle.extended,
@@ -487,19 +486,22 @@ function classifyGesture(hand, motionSpeed = indexSpeed) {
     f.ring.extended
   );
 
-  const drawScore = Math.min(
-    f.index.extended,
-    f.middle.curled,
-    f.ring.curled,
-    f.pinky.curled
-  ) * (1 - pinch * .95);
+  const drawQualified =
+    f.index.extended >= .72 &&
+    f.index.extended - otherExtendedForIndex >= .12 &&
+    f.middle.curled >= .55 &&
+    f.ring.curled >= .55 &&
+    f.pinky.curled >= .55 &&
+    pinch < .34;
 
-  const deleteScore = Math.min(
-    f.pinky.extended,
-    f.index.curled,
-    f.middle.curled,
-    f.ring.curled
-  ) * (1 - pinch * .95);
+  const deleteQualified =
+    f.pinky.extended >= .72 &&
+    f.pinky.extended - otherExtendedForPinky >= .14 &&
+    f.index.curled >= .58 &&
+    f.middle.curled >= .58 &&
+    f.ring.curled >= .58 &&
+    f.thumb <= .52 &&
+    pinch < .20;
 
   const trackScore = Math.min(
     f.thumb,
@@ -509,210 +511,72 @@ function classifyGesture(hand, motionSpeed = indexSpeed) {
     f.pinky.extended
   ) * (1 - pinch);
 
-  const drawQualified =
-    f.index.extended >= .62 &&
-    f.index.extended - otherExtendedForIndex >= .10 &&
-    f.middle.curled >= .46 &&
-    f.ring.curled >= .46 &&
-    f.pinky.curled >= .46;
+  // 高速移動時不允許「剛進入」DRAW；已經在 DRAW 中則保持可正常畫線。
+  const drawMotionGate =
+    motionSpeed <= SETTINGS.drawMaxStartPalmSpeeds ||
+    currentState === "DRAW";
 
-  const deleteQualified =
-    f.pinky.extended >= .64 &&
-    f.pinky.extended - otherExtendedForPinky >= .12 &&
-    f.index.curled >= .52 &&
-    f.middle.curled >= .52 &&
-    f.ring.curled >= .52 &&
-    f.thumb <= .62;
+  const drawScore = drawQualified && drawMotionGate ? 1 : 0;
+  const deleteScore = deleteQualified ? 1 : 0;
 
-  const generic = [
+  const ranked = [
     { name: "GRAB", score: pinch },
-    { name: "DRAW", score: drawQualified ? Math.max(drawScore, .64) : drawScore },
-    { name: "DELETE", score: deleteQualified ? Math.max(deleteScore, .64) : deleteScore },
+    { name: "DRAW", score: drawScore },
+    { name: "DELETE", score: deleteScore },
     { name: "TRACK", score: trackScore },
-  ];
-
-  const ranked = generic.sort((a, b) => b.score - a.score);
+  ].sort((a, b) => b.score - a.score);
 
   const best = ranked[0];
   const second = ranked[1];
-
-  if (best.name === "GRAB" && best.score >= .62) {
-    return { name: "GRAB", score: best.score, margin: best.score - second.score };
-  }
-
-  if (best.score < .56) {
-    return { name: "IDLE", score: best.score, margin: best.score };
-  }
-
-  if (best.score - second.score < .13) {
-    return { name: "IDLE", score: best.score, margin: best.score - second.score };
-  }
-
-  if (
-    best.name === "DRAW" &&
-    motionSpeed > SETTINGS.drawMaxStartSpeed &&
-    stableGesture !== "DRAW"
-  ) {
-    return {
-      name: "IDLE",
-      score: best.score,
-      margin: best.score - second.score,
-    };
-  }
-
-  if (best.name === "DRAW" && !drawQualified) {
-    return { name: "IDLE", score: best.score, margin: best.score - second.score, sideOn };
-  }
-
-  if (best.name === "DELETE" && !deleteQualified) {
-    return { name: "IDLE", score: best.score, margin: best.score - second.score, sideOn };
-  }
-
-  return {
-    name: best.name,
+  const base = {
     score: best.score,
     margin: best.score - second.score,
     sideOn,
   };
-}
-let gestureEvidence = [];
 
-function recordGestureEvidence(result, now) {
-  gestureEvidence.push({
-    name: result.name,
-    score: result.score,
-    margin: result.margin,
-    t: now,
-  });
-
-  while (
-    gestureEvidence.length &&
-    now - gestureEvidence[0].t > SETTINGS.gestureWindowMs
-  ) {
-    gestureEvidence.shift();
+  if (best.name === "GRAB" && best.score >= .62) {
+    return { name: "GRAB", ...base };
   }
+
+  if (best.score < .56) {
+    return { name: "IDLE", ...base };
+  }
+
+  if (best.score - second.score < .13) {
+    return { name: "IDLE", ...base };
+  }
+
+  if (best.name === "DRAW" && !drawQualified) {
+    return { name: "IDLE", ...base };
+  }
+
+  if (best.name === "DELETE" && !deleteQualified) {
+    return { name: "IDLE", ...base };
+  }
+
+  return { name: best.name, ...base };
 }
+let gestureWindow = [];
+let currentState = "IDLE";
 
-function gestureWindowPass(target, now, ratio = SETTINGS.gestureWindowRatio) {
-  const window = gestureEvidence.filter(sample => now - sample.t <= SETTINGS.gestureWindowMs);
-  if (window.length < SETTINGS.gestureWindowMinSamples) return false;
+function windowRatio(target) {
+  if (gestureWindow.length < SETTINGS.gestureMinFrames) return 0;
 
-  const qualifying = window.filter(
-    sample =>
+  let matched = 0;
+  for (const sample of gestureWindow) {
+    if (
       sample.name === target &&
       sample.score >= .60 &&
       sample.margin >= .10
-  );
-
-  return qualifying.length / window.length >= ratio;
-}
-
-function commitGesture(result, now) {
-  recordGestureEvidence(result, now);
-
-  const next = result.name;
-  const confidence = result.score;
-
-  if (next === stableGesture) {
-    gestureCandidate = next;
-    gestureCandidateAt = now;
-    return;
-  }
-
-  if (next !== gestureCandidate) {
-    gestureCandidate = next;
-    gestureCandidateAt = now;
-  }
-
-  if (next !== "IDLE") {
-    // Entry requires a real temporal majority, not a single good frame.
-    if (!gestureWindowPass(next, now)) return;
-
-    const requiredHold =
-      next === "GRAB" && confidence > .82 ? 44 :
-      confidence > .78 ? 58 :
-      82;
-
-    if (now - gestureCandidateAt >= requiredHold) {
-      const previous = stableGesture;
-      stableGesture = next;
-      onGestureChanged(previous, next);
-      gestureEvidence = [];
+    ) {
+      matched++;
     }
-    return;
   }
 
-  // Release is also buffered so a one-frame landmark wobble does not break a
-  // drawing stroke. Any strong competing gesture uses its own 300ms window.
-  const recent = gestureEvidence.filter(
-    sample => now - sample.t <= SETTINGS.gestureReleaseMs
-  );
-  const nonGesture = recent.filter(sample => sample.name === "IDLE").length;
-  const releaseReady =
-    recent.length >= 4 &&
-    nonGesture / recent.length >= SETTINGS.gestureReleaseRatio;
-
-  if (
-    stableGesture !== "IDLE" &&
-    releaseReady &&
-    now - gestureCandidateAt >= SETTINGS.gestureReleaseMs
-  ) {
-    const previous = stableGesture;
-    stableGesture = "IDLE";
-    onGestureChanged(previous, "IDLE");
-    gestureEvidence = [];
-  }
+  return matched / gestureWindow.length;
 }
 
-let indexSpeed = 0;
-let indexSpeedPoint = null;
-let indexSpeedAt = 0;
-
-function resetMotionFilter() {
-  rawPoint = null;
-  filteredPoint = null;
-  velocity = { x: 0, y: 0 };
-  lastSampleAt = 0;
-  motionSamples = [];
-  lastCurvature = 0;
-  lastSpeed = 0;
-  indexSpeed = 0;
-  indexSpeedPoint = null;
-  indexSpeedAt = 0;
-}
-
-function updateIndexSpeed(point, now) {
-  if (!point) {
-    indexSpeed = 0;
-    indexSpeedPoint = null;
-    indexSpeedAt = 0;
-    return 0;
-  }
-
-  if (!indexSpeedPoint) {
-    indexSpeedPoint = { ...point };
-    indexSpeedAt = now;
-    indexSpeed = 0;
-    return 0;
-  }
-
-  const dt = Math.max(.01, Math.min(.12, (now - indexSpeedAt) / 1000));
-  const raw = Math.hypot(point.x - indexSpeedPoint.x, point.y - indexSpeedPoint.y) / dt;
-  indexSpeed = indexSpeed * .72 + raw * .28;
-  indexSpeedPoint = { ...point };
-  indexSpeedAt = now;
-  return indexSpeed;
-}
-
-function onGestureChanged(prev, next) {
-  if (prev === "DRAW" && next !== "DRAW") stopStroke();
-
-  if (prev === "GRAB" && next !== "GRAB") {
-    grabbedStrokeIndex = -1;
-    previousGrabPoint = null;
-    canvasPanning = false;
-  }
-
+function onStart(next) {
   if (next === "DRAW") {
     grabbedStrokeIndex = -1;
     previousGrabPoint = null;
@@ -733,7 +597,11 @@ function onGestureChanged(prev, next) {
       ? [pinchPoint, activePoints[4], activePoints[8]].filter(Boolean)
       : [];
 
-    grabbedStrokeIndex = findHoveredStroke(grabPoints, SETTINGS.collisionRadius * 1.55);
+    grabbedStrokeIndex = findHoveredStroke(
+      grabPoints,
+      SETTINGS.collisionRadius * 1.55
+    );
+
     canvasPanning = grabbedStrokeIndex < 0;
     previousGrabPoint = pinchPoint ? { ...pinchPoint } : null;
 
@@ -741,6 +609,7 @@ function onGestureChanged(prev, next) {
     deleteStartedAt = 0;
     deleteConsumed = false;
     resetMotionFilter();
+
     if (pinchPoint) filteredPoint = { ...pinchPoint };
   }
 
@@ -750,8 +619,6 @@ function onGestureChanged(prev, next) {
     previousGrabPoint = null;
     canvasPanning = false;
 
-    // Only the pinky fingertip can select the target.
-    // No other part of the hand participates in delete targeting.
     const pinkyPoint = activePoints[20];
     deleteTarget = pinkyPoint
       ? findHoveredStroke(
@@ -759,16 +626,142 @@ function onGestureChanged(prev, next) {
           SETTINGS.collisionRadius * 1.2
         )
       : -1;
+
     deleteStartedAt = deleteTarget >= 0 ? performance.now() : 0;
     deleteConsumed = false;
     resetMotionFilter();
   }
+}
 
-  if (next !== "DELETE") {
+function onEnd(prev) {
+  if (prev === "DRAW") stopStroke();
+
+  if (prev === "GRAB") {
+    grabbedStrokeIndex = -1;
+    previousGrabPoint = null;
+    canvasPanning = false;
+  }
+
+  if (prev === "DELETE") {
     deleteTarget = -1;
     deleteStartedAt = 0;
     deleteConsumed = false;
   }
+}
+
+function updateGestureState(result, now) {
+  gestureWindow.push({
+    name: result.name,
+    score: result.score,
+    margin: result.margin,
+    sideOn: Boolean(result.sideOn),
+    t: now,
+  });
+
+  while (gestureWindow.length > SETTINGS.gestureWindowSize) {
+    gestureWindow.shift();
+  }
+
+  if (currentState === "IDLE") {
+    if (gestureWindow.length < SETTINGS.gestureMinFrames) return;
+    if (result.name === "IDLE") return;
+
+    const entryRatio = result.sideOn
+      ? SETTINGS.sideOnEnterRatio
+      : SETTINGS.gestureEnterRatio;
+
+    if (windowRatio(result.name) >= entryRatio) {
+      currentState = result.name;
+      onStart(currentState);
+      gestureWindow = [];
+    }
+
+    return;
+  }
+
+  // Schmitt-style maintain gate: once active, only <30% releases it.
+  if (windowRatio(currentState) < SETTINGS.gestureMaintainRatio) {
+    const ended = currentState;
+    onEnd(ended);
+    currentState = "IDLE";
+    gestureWindow = [];
+  }
+}
+
+let indexSpeed = 0;
+let indexSpeedPoint = null;
+let indexSpeedAt = 0;
+let indexWorldSpeed = 0;
+let indexWorldPoint = null;
+let indexWorldAt = 0;
+
+function resetMotionFilter() {
+  rawPoint = null;
+  filteredPoint = null;
+  velocity = { x: 0, y: 0 };
+  lastSampleAt = 0;
+  motionSamples = [];
+  lastCurvature = 0;
+  lastSpeed = 0;
+  indexSpeed = 0;
+  indexSpeedPoint = null;
+  indexSpeedAt = 0;
+  indexWorldSpeed = 0;
+  indexWorldPoint = null;
+  indexWorldAt = 0;
+}
+
+function updateIndexSpeed(point, now) {
+  if (!point) {
+    indexSpeed = 0;
+    indexSpeedPoint = null;
+    indexSpeedAt = 0;
+    return 0;
+  }
+
+  if (!indexSpeedPoint) {
+    indexSpeedPoint = { ...point };
+    indexSpeedAt = now;
+    indexSpeed = 0;
+    return 0;
+  }
+
+  const dt = Math.max(.01, Math.min(.12, (now - indexSpeedAt) / 1000));
+  const raw = Math.hypot(
+    point.x - indexSpeedPoint.x,
+    point.y - indexSpeedPoint.y
+  ) / dt;
+
+  indexSpeed = indexSpeed * .72 + raw * .28;
+  indexSpeedPoint = { ...point };
+  indexSpeedAt = now;
+  return indexSpeed;
+}
+
+function updateIndexWorldSpeed(hand, now) {
+  const point = hand?.[8];
+  if (!point) {
+    indexWorldSpeed = 0;
+    indexWorldPoint = null;
+    indexWorldAt = 0;
+    return 0;
+  }
+
+  if (!indexWorldPoint) {
+    indexWorldPoint = { ...point };
+    indexWorldAt = now;
+    indexWorldSpeed = 0;
+    return 0;
+  }
+
+  const dt = Math.max(.01, Math.min(.12, (now - indexWorldAt) / 1000));
+  const scale = palmScale(hand);
+  const raw = dist(point, indexWorldPoint) / Math.max(.0001, scale * dt);
+
+  indexWorldSpeed = indexWorldSpeed * .72 + raw * .28;
+  indexWorldPoint = { ...point };
+  indexWorldAt = now;
+  return indexWorldSpeed;
 }
 
 function estimateKinematics(point, now) {
@@ -1092,7 +1085,7 @@ function drawHand(points) {
 }
 
 function drawDeletePreview() {
-  if (stableGesture !== "DELETE" || deleteTarget < 0 || !deleteStartedAt || deleteConsumed) return;
+  if (currentState !== "DELETE" || deleteTarget < 0 || !deleteStartedAt || deleteConsumed) return;
 
   const b = strokeBounds[deleteTarget];
   if (!b) return;
@@ -1292,10 +1285,10 @@ function updateInteraction(now) {
     updateIndexSpeed(indexPoint, now);
     const pinchPoint = midpoint(activePoints[4], activePoints[8]);
 
-    if (stableGesture === "GRAB") {
+    if (currentState === "GRAB") {
       point = naturalFilter(pinchPoint, now, "GRAB");
       handleGrab(point);
-    } else if (stableGesture === "DRAW") {
+    } else if (currentState === "DRAW") {
       point = naturalFilter(indexPoint, now, "DRAW");
       handleDrawing(point);
     }
@@ -1310,17 +1303,17 @@ function updateInteraction(now) {
       now
     );
   } else if (now - lastSampleAt > SETTINGS.lostGraceMs) {
-    stableGesture = "IDLE";
-    gestureCandidate = "IDLE";
+    currentState = "IDLE";
+    _legacyGestureCandidate = "IDLE";
     grabbedStrokeIndex = -1;
     previousGrabPoint = null;
     deleteTarget = -1;
   }
 
   const hoverPoints =
-    stableGesture === "GRAB"
+    currentState === "GRAB"
       ? [activePoints[4], activePoints[8], midpoint(activePoints[4], activePoints[8])].filter(Boolean)
-      : stableGesture === "DELETE"
+      : currentState === "DELETE"
         ? [activePoints[20]].filter(Boolean)
         : activePoints;
 
@@ -1330,7 +1323,7 @@ function updateInteraction(now) {
 
   hoveredStrokeIndex = findHoveredStroke(hoverPoints, radius);
 
-  if (stableGesture === "DELETE") {
+  if (currentState === "DELETE") {
     // Pinky mode locks to one hovered stroke. Never call clearAll here.
     if (deleteTarget < 0 && hoveredStrokeIndex >= 0) {
       deleteTarget = hoveredStrokeIndex;
@@ -1347,7 +1340,7 @@ function updateInteraction(now) {
     DELETE: deleteTarget >= 0 ? "PINKY · SELECT / DELETE" : "PINKY · TARGET A STROKE",
   };
 
-  status.textContent = running ? labels[stableGesture] : "CAMERA OFF";
+  status.textContent = running ? labels[currentState] : "CAMERA OFF";
   motionLabel.textContent = running
     ? "HAND MOTION · speed " + Math.round(lastSpeed) + " · curvature " + lastCurvature.toFixed(2)
     : "HAND MOTION · READY";
