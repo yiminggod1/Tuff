@@ -4,11 +4,46 @@ Browser-based hand-tracking canvas built around natural human drawing kinematics
 
 ## Gesture controls
 
-Before drawing begins, Tuff runs a short 3D hand calibration. The camera stays active while a real-time perspective skeleton is rendered from MediaPipe world landmarks. You must hold four poses in sequence: open palm, thumb + index pinch, pinky only, then index only.
+Tuff does not drop the user directly into drawing. After the camera starts, a guided personal calibration appears over the **live camera feed**.
+
+The calibration teaches one pose at a time:
+
+1. **Open hand** → tracking
+2. **Thumb + index pinch** → move
+3. **Pinky only** → select/delete one object
+4. **Index only** → draw
+
+For every step, the user sees a finger-by-finger pose guide, the real camera image, the detected 21-point hand skeleton, a true 3D world-landmark inset, and five live checks:
+
+- hand visibility / framing
+- gesture-shape match
+- 3D depth quality
+- movement stability
+- personal fit
+
+A pose is accepted only after all required checks are healthy and the user holds still through the confirmation bar.
+
+## Personal multi-dimensional calibration
+
+The calibration is intentionally more than a gesture-name test. Tuff builds a per-session personal hand profile from multiple 3D dimensions:
+
+- 21 landmarks in canonical 3D coordinates
+- wrist-centered and palm-axis normalized hand shape
+- scale-normalized finger geometry
+- finger extension/curl baselines
+- thumb-index pinch ratio
+- short-term motion stability
+- hand framing and depth structure
+
+The learned 3D template is then blended with the anatomical gesture detector. This lets the app be stricter about **who is being tracked** and less dependent on one fixed set of hand-angle thresholds.
+
+No raw camera frames are uploaded by Tuff. The personal calibration profile lives in browser memory for the current session.
+
+## Interaction
 
 - Index finger only → draw a persistent neon stroke
 - Thumb + index pinch → grab and move the selected object; pinch on empty space pans the canvas
-- Pinky only → select the hovered stroke and hold briefly to delete that single stroke
+- Pinky only → select the hovered stroke and hold briefly to delete that **single** stroke
 - Open palm → tracking only
 - S → export PNG
 
@@ -18,7 +53,7 @@ Pinky deletion is intentionally target-scoped: it can remove one hovered stroke 
 
 The pointer is not treated as a raw mouse cursor. It uses adaptive filtering driven by estimated fingertip speed and local path curvature. Slow micro-movements are attenuated while intentional fast movement receives a faster response. Tight turns receive slightly more damping, reflecting the documented speed–curvature relationship in human drawing movements.
 
-Captured samples are resampled for stable spacing and rendered as continuous Bézier segments. Gesture classification uses 3D world-landmark geometry when available, while the on-screen cursor uses mirrored image coordinates. Particle emission follows movement speed and is reduced around tighter turns.
+Captured samples are resampled for stable spacing and rendered as continuous Bézier segments. The cursor uses mirrored image coordinates, while gesture geometry uses MediaPipe 3D world landmarks when available.
 
 ## Stack
 
