@@ -1854,6 +1854,7 @@ async function start() {
     calibrationActive = true;
     calibrationIndex = 0;
     calibrationHoldStarted = 0;
+    calibrationConfirmedUntil = 0;
     calibrationSamples = [];
     calibrationRecentPoses = [];
     calibrationRecentScales = [];
