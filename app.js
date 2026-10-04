@@ -77,6 +77,9 @@ let stream = null;
 let running = false;
 let lastVideoTime = -1;
 let lastDetectAt = 0;
+let lastTrackerFrameAt = 0;
+let lastHandSeenAt = 0;
+let videoFrameCallbackId = 0;
 let latestHand = null;
 let latestWorldHand = null;
 let activePoints = [];
@@ -1353,25 +1356,45 @@ function updateInteraction(now) {
     DELETE: deleteTarget >= 0 ? "PINKY · SELECT / DELETE" : "PINKY · TARGET A STROKE",
   };
 
-  status.textContent = running ? labels[currentState] : "CAMERA OFF";
+  if (!running) {
+    status.textContent = "CAMERA OFF";
+  } else if (currentState !== "IDLE") {
+    status.textContent = labels[currentState];
+  } else if (lastTrackerFrameAt && now - lastTrackerFrameAt > 700) {
+    status.textContent = "TRACKER WAITING";
+  } else if (!lastHandSeenAt || now - lastHandSeenAt > 450) {
+    status.textContent = "NO HAND · TRACKER LIVE";
+  } else {
+    status.textContent = labels[currentState];
+  }
   motionLabel.textContent = running
     ? "HAND MOTION · 3D speed " + indexWorldSpeed.toFixed(2) + " · curvature " + lastCurvature.toFixed(2)
     : "HAND MOTION · READY";
 }
 
-function processVideo(now) {
+function processVideo(now, mediaTimeMs = null) {
   if (!running || !landmarker || video.readyState < 2) return;
-  if (video.currentTime === lastVideoTime || now - lastDetectAt < SETTINGS.detectIntervalMs) return;
 
-  lastVideoTime = video.currentTime;
+  const videoTime = video.currentTime;
+  if (videoTime === lastVideoTime && now - lastDetectAt < SETTINGS.detectIntervalMs) return;
+
+  lastVideoTime = videoTime;
   lastDetectAt = now;
+  lastTrackerFrameAt = now;
 
   try {
-    const result = landmarker.detectForVideo(video, now);
+    // requestVideoFrameCallback 的 mediaTime 是媒體時間；用它做 timestamp
+    // 可避免 RAF / 實際 camera frame 不同步造成的推論節奏問題。
+    const timestamp = Number.isFinite(mediaTimeMs)
+      ? mediaTimeMs
+      : now;
+
+    const result = landmarker.detectForVideo(video, timestamp);
     const rawImageHand = result.landmarks?.[0] || null;
     const rawWorldHand = result.worldLandmarks?.[0] || null;
 
     if (rawImageHand) {
+      lastHandSeenAt = now;
       latestHand = smoothLandmarks(rawImageHand, now, imageLandmarkFilters);
       latestWorldHand = rawWorldHand
         ? smoothLandmarks(rawWorldHand, now, worldLandmarkFilters)
@@ -1396,11 +1419,42 @@ function processVideo(now) {
   }
 }
 
+
+let fallbackDetectionTimer = 0;
+
+function startVideoDetection() {
+  if (video.requestVideoFrameCallback) {
+    scheduleVideoDetection();
+    return;
+  }
+
+  const tick = () => {
+    if (!running) return;
+    const now = performance.now();
+    processVideo(now, now);
+    fallbackDetectionTimer = window.setTimeout(tick, SETTINGS.detectIntervalMs);
+  };
+
+  tick();
+}
+
+function scheduleVideoDetection() {
+  if (!running || !videoFrameCallbackId && !video.requestVideoFrameCallback) return;
+
+  if (video.requestVideoFrameCallback) {
+    videoFrameCallbackId = video.requestVideoFrameCallback((now, metadata) => {
+      if (running) {
+        processVideo(now, metadata.mediaTime * 1000);
+        scheduleVideoDetection();
+      }
+    });
+  }
+}
+
 function frame(now) {
   const dt = Math.min(.05, Math.max(.001, (now - lastFrameAt) / 1000));
   lastFrameAt = now;
 
-  processVideo(now);
   updateInteraction(now);
   drawEffects(dt);
 
@@ -1459,6 +1513,7 @@ async function start() {
     running = true;
     startScreen.classList.add("hidden");
     resetLandmarkFilters();
+    startVideoDetection();
     resizeCanvas();
   } catch (error) {
     console.error(error);
@@ -1504,6 +1559,12 @@ window.addEventListener("keydown", event => {
   if (key === "s") savePng();
 });
 window.addEventListener("beforeunload", () => {
+  if (videoFrameCallbackId && video.cancelVideoFrameCallback) {
+    video.cancelVideoFrameCallback(videoFrameCallbackId);
+  }
+  if (fallbackDetectionTimer) {
+    clearTimeout(fallbackDetectionTimer);
+  }
   if (stream) stream.getTracks().forEach(track => track.stop());
 });
 
