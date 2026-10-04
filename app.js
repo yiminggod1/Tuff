@@ -418,9 +418,15 @@ function onGestureChanged(prev, next) {
     previousGrabPoint = null;
     canvasPanning = false;
 
-    // Only one target can ever be selected. Nothing is deleted when the
-    // pinky is away from an existing stroke.
-    deleteTarget = findHoveredStroke(activePoints, SETTINGS.collisionRadius * 1.2);
+    // Only the pinky fingertip can select the target.
+    // No other part of the hand participates in delete targeting.
+    const pinkyPoint = activePoints[20];
+    deleteTarget = pinkyPoint
+      ? findHoveredStroke(
+          [pinkyPoint],
+          SETTINGS.collisionRadius * 1.2
+        )
+      : -1;
     deleteStartedAt = deleteTarget >= 0 ? performance.now() : 0;
     deleteConsumed = false;
     resetMotionFilter();
