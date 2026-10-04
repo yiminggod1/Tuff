@@ -538,7 +538,11 @@ function classifyGesture(hand, motionSpeed = indexWorldSpeed) {
     sideOn,
   };
 
-  if (best.name === "GRAB" && best.score >= .62) {
+  if (
+    best.name === "GRAB" &&
+    best.score >= .62 &&
+    best.margin >= .13
+  ) {
     return { name: "GRAB", ...base };
   }
 
@@ -546,7 +550,7 @@ function classifyGesture(hand, motionSpeed = indexWorldSpeed) {
     return { name: "IDLE", ...base };
   }
 
-  if (best.score - second.score < .13) {
+  if (best.margin < .13) {
     return { name: "IDLE", ...base };
   }
 
