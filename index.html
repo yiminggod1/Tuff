@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="description" content="Tuff — natural hand-trajectory neon canvas.">
+  <title>Tuff · Gesture Canvas</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main id="stage" class="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="drawingCanvas"></canvas>
+    <canvas id="effectsCanvas"></canvas>
+
+    <section id="startScreen" class="start-screen" aria-label="Start Gesture Canvas">
+      <div class="logo-mark" aria-hidden="true"><span></span></div>
+      <div class="eyebrow">TUFF / GESTURE CANVAS</div>
+      <h1>Draw with your hand.</h1>
+      <p>Open your palm to track. Raise only your index finger to draw.</p>
+      <button id="startButton" type="button">Start camera</button>
+      <p id="startError" class="error" role="status"></p>
+    </section>
+
+    <div class="topbar">
+      <div id="status" class="status">CAMERA OFF</div>
+      <div id="motion" class="motion">MOTION MODEL · READY</div>
+    </div>
+
+    <div class="hint"><span>INDEX</span> draw · <span>PINCH</span> move · <span>FIST</span> delete · <span>C</span> clear · <span>S</span> save</div>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
