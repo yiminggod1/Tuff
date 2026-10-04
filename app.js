@@ -80,6 +80,7 @@ let calibrationActive = false;
 let calibrationIndex = 0;
 let calibrationHoldStarted = 0;
 let calibrationConfirmedUntil = 0;
+let calibrationGuideGesture = null;
 let calibrationSamples = [];
 let calibrationRecentPoses = [];
 let calibrationRecentScales = [];
@@ -141,7 +142,8 @@ let calibrationLastExpected = null;
 let calibrationLastConfidence = 0;
 
 function setupCalibrationPoseGuide(step) {
-  if (!calibrationPose) return;
+  if (!calibrationPose || !step || calibrationGuideGesture === step.gesture) return;
+  calibrationGuideGesture = step.gesture;
 
   const labels = [
     ["thumb", "THUMB"],
@@ -1846,7 +1848,8 @@ async function start() {
     video.srcObject = stream;
     await video.play();
 
-    landmarker = await createLandmarker();
+    // Enter the guided camera view immediately. Hand-model loading can happen
+    // while the user already sees the real camera reference.
     running = true;
     startScreen.classList.add("hidden");
     stage.classList.add("calibrating");
@@ -1860,11 +1863,20 @@ async function start() {
     calibrationRecentScales = [];
     calibrationLastExpected = null;
     calibrationLastConfidence = 0;
+    calibrationGuideGesture = null;
     for (const key of Object.keys(calibrationProfile)) delete calibrationProfile[key];
     calibrationScreen?.classList.remove("hidden");
     resizeCanvas();
+
+    // Load the tracker after the user can already see the live setup screen.
+    landmarker = await createLandmarker();
   } catch (error) {
     console.error(error);
+    running = false;
+    calibrationActive = false;
+    stage.classList.remove("calibrating");
+    calibrationScreen?.classList.add("hidden");
+    startScreen.classList.remove("hidden");
     startError.textContent = error?.message || "Unable to access the camera or hand model.";
     startButton.disabled = false;
 
