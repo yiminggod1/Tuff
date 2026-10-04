@@ -399,7 +399,7 @@ function fingerFoldbackScore(hand, mcp, pip, dip, tip) {
   // 用手指自己的軸，而不是固定 camera-Y，判斷指尖是否折回 PIP。
   const foldback = dot3(tipFromPip, axis);
   const foldbackScore = clamp01(
-    (-foldback) / Math.max(.025, scale * .20)
+    (-foldback) / (scale * .20)
   );
 
   const pipAngle = jointAngle(hand[mcp], hand[pip], hand[dip]);
