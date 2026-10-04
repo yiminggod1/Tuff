@@ -319,6 +319,11 @@ button:disabled { opacity: .5; cursor: progress; }
 .calibration-head h2 { margin: 2px 0 5px; }
 .calibration-head p { margin: 0; max-width: 720px; }
 
+.calibration-confirm-hidden {
+  visibility: hidden;
+  opacity: 0;
+}
+
 .calibration-confirm {
   min-width: 146px;
   padding: 9px 11px;
