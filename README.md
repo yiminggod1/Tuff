@@ -8,7 +8,6 @@ Browser-based hand-tracking canvas built around natural human drawing kinematics
 - Thumb + index pinch → grab and move the selected object; pinch on empty space pans the canvas
 - Pinky only → select the hovered stroke and hold briefly to delete that single stroke
 - Open palm → tracking only
-- C → clear the canvas explicitly
 - S → export PNG
 
 Pinky deletion is intentionally target-scoped: it can remove one hovered stroke at a time and never clears the whole canvas.
