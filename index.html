@@ -14,48 +14,11 @@
     <canvas id="drawingCanvas"></canvas>
     <canvas id="effectsCanvas"></canvas>
 
-    <section id="calibrationScreen" class="calibration-screen" aria-label="Guided 3D hand calibration">
-      <canvas id="calibrationOverlayCanvas" aria-hidden="true"></canvas>
-      <div class="calibration-card">
-        <div class="eyebrow">TUFF / PERSONAL 3D HAND SETUP</div>
-        <div class="calibration-head">
-          <div>
-            <div id="calibrationStep" class="calibration-step">STEP 1 / 4</div>
-            <h2 id="calibrationTitle">Show your hand</h2>
-            <p id="calibrationText">Use the live camera below. Match the instruction, then hold still until TUFF confirms it.</p>
-          </div>
-          <div id="calibrationConfirm" class="calibration-confirm calibration-confirm-hidden" aria-live="polite"></div>
-        </div>
-
-        <div class="calibration-instructions">
-          <div class="pose-guide">
-            <div id="calibrationPoseTitle" class="pose-title">POSE GUIDE</div>
-            <div id="calibrationPose" class="pose-diagram" aria-label="Gesture pose guide"></div>
-          </div>
-          <div class="calibration-checks">
-            <div class="check-row"><span>HAND</span><b id="checkHand">SEARCHING</b></div>
-            <div class="check-row"><span>SHAPE</span><b id="checkShape">—</b></div>
-            <div class="check-row"><span>3D DEPTH</span><b id="checkDepth">—</b></div>
-            <div class="check-row"><span>STABILITY</span><b id="checkStability">—</b></div>
-            <div class="check-row"><span>PERSONAL FIT</span><b id="checkPersonal">LEARNING</b></div>
-          </div>
-        </div>
-
-        <div class="calibration-progress">
-          <div class="calibration-meter"><span id="calibrationMeterFill"></span></div>
-          <div id="calibrationFeedback" class="calibration-feedback">Move your whole hand into view.</div>
-        </div>
-
-        <canvas id="calibrationCanvas" width="520" height="320" aria-label="True 3D hand preview"></canvas>
-        <div class="calibration-foot">The live camera is the reference. The 3D inset uses MediaPipe world landmarks. Your hand shape is measured only in this browser session.</div>
-      </div>
-    </section>
-
     <section id="startScreen" class="start-screen" aria-label="Start Gesture Canvas">
       <div class="logo-mark" aria-hidden="true"><span></span></div>
       <div class="eyebrow">TUFF / GESTURE CANVAS</div>
       <h1>Draw with your hand.</h1>
-      <p>First, follow the on-screen hand tutorial. TUFF learns your own 3D hand shape before drawing starts.</p>
+      <p>Index finger draws. Thumb + index pinch moves. Pinky selects and deletes one object.</p>
       <button id="startButton" type="button">Start camera</button>
       <p id="startError" class="error" role="status"></p>
     </section>
