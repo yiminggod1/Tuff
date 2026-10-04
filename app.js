@@ -80,6 +80,7 @@ let lastVideoTime = -1;
 let lastDetectAt = 0;
 let lastTrackerFrameAt = 0;
 let lastHandSeenAt = 0;
+let lastDetectionTimestamp = -1;
 let videoFrameCallbackId = 0;
 let trackerError = "";
 let latestHand = null;
