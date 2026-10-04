@@ -1346,7 +1346,7 @@ function updateInteraction(now) {
   }
 
   const labels = {
-    IDLE: "READY",
+    IDLE: latestHand ? "READY" : "NO HAND · CAMERA LIVE",
     TRACK: "TRACKING",
     DRAW: "DRAWING",
     GRAB: grabbedStrokeIndex >= 0 ? "PINCH · MOVE OBJECT" : "PINCH · MOVE CANVAS",
@@ -1355,7 +1355,7 @@ function updateInteraction(now) {
 
   status.textContent = running ? labels[currentState] : "CAMERA OFF";
   motionLabel.textContent = running
-    ? "HAND MOTION · speed " + Math.round(lastSpeed) + " · curvature " + lastCurvature.toFixed(2)
+    ? "HAND MOTION · 3D speed " + indexWorldSpeed.toFixed(2) + " · curvature " + lastCurvature.toFixed(2)
     : "HAND MOTION · READY";
 }
 
