@@ -1296,7 +1296,6 @@ function updateInteraction(now) {
     activePoints = latestHand.map(p => displayPoint(p.x, p.y));
 
     const indexPoint = activePoints[8];
-    updateIndexSpeed(indexPoint, now);
     const pinchPoint = midpoint(activePoints[4], activePoints[8]);
 
     if (currentState === "GRAB") {
