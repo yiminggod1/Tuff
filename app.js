@@ -1332,16 +1332,20 @@ function updateInteraction(now) {
   }
 
   if (latestHand) {
-    commitGesture(
-      classifyGesture(latestWorldHand || latestHand, indexSpeed),
+    updateGestureState(
+      classifyGesture(latestWorldHand || latestHand, indexWorldSpeed),
       now
     );
   } else if (now - lastSampleAt > SETTINGS.lostGraceMs) {
+    const ended = currentState;
     currentState = "IDLE";
-    _legacyGestureCandidate = "IDLE";
+    gestureWindow = [];
+    if (ended !== "IDLE") onEnd(ended);
     grabbedStrokeIndex = -1;
     previousGrabPoint = null;
     deleteTarget = -1;
+    resetLandmarkFilters();
+    resetMotionFilter();
   }
 
   const hoverPoints =
