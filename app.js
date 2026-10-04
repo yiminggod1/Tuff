@@ -2,6 +2,7 @@ import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@m
 
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
+const RUNTIME_VERSION = "2026.10.04-0146";
 
 const COLORS = {
   draw: "#FF4F91",
@@ -80,6 +81,7 @@ let lastDetectAt = 0;
 let lastTrackerFrameAt = 0;
 let lastHandSeenAt = 0;
 let videoFrameCallbackId = 0;
+let trackerError = "";
 let latestHand = null;
 let latestWorldHand = null;
 let activePoints = [];
@@ -1358,6 +1360,8 @@ function updateInteraction(now) {
 
   if (!running) {
     status.textContent = "CAMERA OFF";
+  } else if (trackerError) {
+    status.textContent = "TRACKER ERROR";
   } else if (currentState !== "IDLE") {
     status.textContent = labels[currentState];
   } else if (lastTrackerFrameAt && now - lastTrackerFrameAt > 700) {
@@ -1367,9 +1371,11 @@ function updateInteraction(now) {
   } else {
     status.textContent = labels[currentState];
   }
-  motionLabel.textContent = running
-    ? "HAND MOTION · 3D speed " + indexWorldSpeed.toFixed(2) + " · curvature " + lastCurvature.toFixed(2)
-    : "HAND MOTION · READY";
+  motionLabel.textContent = !running
+    ? "HAND MOTION · READY · runtime " + RUNTIME_VERSION
+    : trackerError
+      ? "TRACKER ERROR · " + trackerError.slice(0, 90)
+      : "HAND MOTION · 3D speed " + indexWorldSpeed.toFixed(2) + " · curvature " + lastCurvature.toFixed(2);
 }
 
 function processVideo(now, mediaTimeMs = null) {
@@ -1412,6 +1418,7 @@ function processVideo(now, mediaTimeMs = null) {
       resetLandmarkFilters();
     }
   } catch (error) {
+    trackerError = error?.message || String(error);
     console.warn("Hand detection failed", error);
     latestHand = null;
     latestWorldHand = null;
