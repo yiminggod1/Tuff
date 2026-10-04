@@ -151,37 +151,69 @@ function jointAngle(a, b, c) {
   return Math.acos(Math.max(-1, Math.min(1, (abx * cbx + aby * cby + abz * cbz) / denom))) * 180 / Math.PI;
 }
 
-function fingerScore(hand, mcp, pip, dip, tip) {
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function fingerGeometry(hand, mcp, pip, dip, tip) {
   const palm = Math.max(.0001, dist(hand[0], hand[9]));
   const direct = dist(hand[mcp], hand[tip]);
-  const chain = dist(hand[mcp], hand[pip]) + dist(hand[pip], hand[dip]) + dist(hand[dip], hand[tip]);
+  const chain =
+    dist(hand[mcp], hand[pip]) +
+    dist(hand[pip], hand[dip]) +
+    dist(hand[dip], hand[tip]);
+
   const straightness = chain ? direct / chain : 0;
-  const reach = direct / palm;
-  const a1 = jointAngle(hand[mcp], hand[pip], hand[dip]);
-  const a2 = jointAngle(hand[pip], hand[dip], hand[tip]);
+  const wristReach = dist(hand[0], hand[tip]) / palm;
+  const pipA = jointAngle(hand[mcp], hand[pip], hand[dip]);
+  const dipA = jointAngle(hand[pip], hand[dip], hand[tip]);
 
-  const reachScore = Math.max(0, Math.min(1, (reach - .68) / .62));
-  const straightScore = Math.max(0, Math.min(1, (straightness - .70) / .25));
-  const angleScore = Math.max(0, Math.min(1, ((a1 - 108) / 62 + (a2 - 112) / 68) * .5));
+  const pipExtended = clamp01((pipA - 138) / 34);
+  const dipExtended = clamp01((dipA - 140) / 32);
+  const reachExtended = clamp01((wristReach - .95) / .78);
+  const straightExtended = clamp01((straightness - .76) / .18);
 
-  return reachScore * .42 + straightScore * .30 + angleScore * .28;
+  const extended = (
+    pipExtended * .34 +
+    dipExtended * .28 +
+    reachExtended * .22 +
+    straightExtended * .16
+  );
+
+  const pipCurled = clamp01((146 - pipA) / 48);
+  const dipCurled = clamp01((150 - dipA) / 45);
+  const reachCurled = clamp01((1.55 - wristReach) / .70);
+
+  const curled = (
+    pipCurled * .43 +
+    dipCurled * .32 +
+    reachCurled * .25
+  );
+
+  return {
+    extended: clamp01(extended),
+    curled: clamp01(curled),
+    pip: pipA,
+    dip: dipA,
+    reach: wristReach,
+  };
 }
 
 function fingerFlags(hand) {
-  const scores = {
-    index: fingerScore(hand, 5, 6, 7, 8),
-    middle: fingerScore(hand, 9, 10, 11, 12),
-    ring: fingerScore(hand, 13, 14, 15, 16),
-    pinky: fingerScore(hand, 17, 18, 19, 20),
+  const fingers = {
+    index: fingerGeometry(hand, 5, 6, 7, 8),
+    middle: fingerGeometry(hand, 9, 10, 11, 12),
+    ring: fingerGeometry(hand, 13, 14, 15, 16),
+    pinky: fingerGeometry(hand, 17, 18, 19, 20),
   };
 
   const palm = Math.max(.0001, dist(hand[0], hand[9]));
+  const thumbReach = dist(hand[0], hand[4]) / palm;
+  const thumbOpen = clamp01((thumbReach - .72) / .62);
+
   return {
-    thumb: dist(hand[4], hand[5]) / palm > .43,
-    index: scores.index >= .50 && scores.index >= (scores.middle + scores.ring + scores.pinky) / 3 + .04,
-    middle: scores.middle >= .50,
-    ring: scores.ring >= .50,
-    pinky: scores.pinky >= .50,
+    thumb: thumbOpen,
+    ...fingers,
   };
 }
 
@@ -189,44 +221,92 @@ function pinchRatio(hand) {
   return dist(hand[4], hand[8]) / Math.max(.0001, dist(hand[0], hand[9]));
 }
 
-function updatePinch(ratio) {
-  if (pinchActive) {
-    if (ratio >= SETTINGS.pinchRelease) pinchActive = false;
-  } else if (ratio <= SETTINGS.pinchStart) {
-    pinchActive = true;
-  }
-  return pinchActive;
+function pinchConfidence(hand) {
+  const ratio = pinchRatio(hand);
+  return clamp01((.62 - ratio) / .24);
 }
 
 function classifyGesture(hand) {
   const f = fingerFlags(hand);
+  const pinch = pinchConfidence(hand);
 
-  // Pinch always wins: thumb + index is the exclusive grab/drag gesture.
-  if (updatePinch(pinchRatio(hand))) return "GRAB";
+  const drawScore =
+    f.index.extended *
+    f.middle.curled *
+    f.ring.curled *
+    f.pinky.curled *
+    (1 - pinch * .9);
 
-  // Index only = draw.
-  if (f.index && !f.middle && !f.ring && !f.pinky) return "DRAW";
+  const deleteScore =
+    f.pinky.extended *
+    f.index.curled *
+    f.middle.curled *
+    f.ring.curled *
+    (1 - pinch * .9);
 
-  // Pinky only = select/delete exactly one hovered object.
-  if (f.pinky && !f.index && !f.middle && !f.ring) return "DELETE";
+  const trackScore =
+    Math.min(
+      f.thumb,
+      f.index.extended,
+      f.middle.extended,
+      f.ring.extended,
+      f.pinky.extended
+    ) *
+    (1 - pinch);
 
-  // Open palm = tracking only.
-  if (f.thumb && f.index && f.middle && f.ring && f.pinky) return "TRACK";
+  const grabScore = pinch;
 
-  return "IDLE";
+  const ranked = [
+    { name: "GRAB", score: grabScore },
+    { name: "DRAW", score: drawScore },
+    { name: "DELETE", score: deleteScore },
+    { name: "TRACK", score: trackScore },
+  ].sort((a, b) => b.score - a.score);
+
+  const best = ranked[0];
+  const second = ranked[1];
+
+  if (best.score < .58) {
+    return { name: "IDLE", score: best.score, margin: best.score };
+  }
+
+  if (best.score - second.score < .11) {
+    return { name: "IDLE", score: best.score, margin: best.score - second.score };
+  }
+
+  return {
+    name: best.name,
+    score: best.score,
+    margin: best.score - second.score,
+  };
 }
 
-function commitGesture(next, now) {
+function commitGesture(result, now) {
+  const next = result.name;
+  const confidence = result.score;
+
+  if (next === stableGesture) {
+    gestureCandidate = next;
+    gestureCandidateAt = now;
+    return;
+  }
+
   if (next !== gestureCandidate) {
     gestureCandidate = next;
     gestureCandidateAt = now;
     return;
   }
 
-  if (next !== stableGesture && now - gestureCandidateAt >= SETTINGS.gestureHoldMs) {
-    const prev = stableGesture;
+  const requiredHold =
+    next === "GRAB" && confidence > .82 ? 34 :
+    confidence > .80 ? 42 :
+    confidence > .70 ? 62 :
+    95;
+
+  if (now - gestureCandidateAt >= requiredHold) {
+    const previous = stableGesture;
     stableGesture = next;
-    onGestureChanged(prev, next);
+    onGestureChanged(previous, next);
   }
 }
 
@@ -262,10 +342,7 @@ function onGestureChanged(prev, next) {
 
   if (next === "GRAB") {
     const pinchPoint = latestHand
-      ? displayPoint(
-          (latestHand[4].x + latestHand[8].x) * .5,
-          (latestHand[4].y + latestHand[8].y) * .5
-        )
+      ? midpoint(activePoints[4], activePoints[8])
       : filteredPoint;
 
     const grabPoints = latestHand
