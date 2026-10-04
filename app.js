@@ -110,29 +110,36 @@ class OneEuroFilter {
   }
 }
 
-const landmarkFilters = Array.from({ length: 21 }, () => ({
-  x: new OneEuroFilter(1.25, .025, 1.0),
-  y: new OneEuroFilter(1.25, .025, 1.0),
-  z: new OneEuroFilter(1.10, .030, 1.0),
-}));
+function createLandmarkFilterBank() {
+  return Array.from({ length: 21 }, () => ({
+    x: new OneEuroFilter(1.25, .025, 1.0),
+    y: new OneEuroFilter(1.25, .025, 1.0),
+    z: new OneEuroFilter(1.10, .030, 1.0),
+  }));
+}
+
+const imageLandmarkFilters = createLandmarkFilterBank();
+const worldLandmarkFilters = createLandmarkFilterBank();
 
 function resetLandmarkFilters() {
-  for (const filter of landmarkFilters) {
-    filter.x.reset();
-    filter.y.reset();
-    filter.z.reset();
+  for (const bank of [imageLandmarkFilters, worldLandmarkFilters]) {
+    for (const filter of bank) {
+      filter.x.reset();
+      filter.y.reset();
+      filter.z.reset();
+    }
   }
 }
 
-function smoothLandmarks(points, nowMs) {
+function smoothLandmarks(points, nowMs, filterBank) {
   if (!points || points.length !== 21) return null;
 
   return points.map((point, index) => ({
-    x: landmarkFilters[index].x.filter(point.x, nowMs),
-    y: landmarkFilters[index].y.filter(point.y, nowMs),
+    x: filterBank[index].x.filter(point.x, nowMs),
+    y: filterBank[index].y.filter(point.y, nowMs),
     z: point.z == null
       ? 0
-      : landmarkFilters[index].z.filter(point.z, nowMs),
+      : filterBank[index].z.filter(point.z, nowMs),
   }));
 }
 
@@ -2007,8 +2014,8 @@ function processVideo(now) {
     const rawWorldHand = result.worldLandmarks?.[0] || rawImageHand;
 
     if (rawImageHand && rawWorldHand) {
-      latestHand = smoothLandmarks(rawImageHand, now);
-      latestWorldHand = smoothLandmarks(rawWorldHand, now);
+      latestHand = smoothLandmarks(rawImageHand, now, imageLandmarkFilters);
+      latestWorldHand = smoothLandmarks(rawWorldHand, now, worldLandmarkFilters);
     } else {
       latestHand = null;
       latestWorldHand = null;
