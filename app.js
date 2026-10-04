@@ -15,7 +15,12 @@ const COLORS = {
 const SETTINGS = {
   detectIntervalMs: 26,
   lostGraceMs: 110,
-  gestureHoldMs: 62,
+  gestureWindowMs: 300,
+  gestureWindowRatio: .80,
+  gestureWindowMinSamples: 5,
+  gestureReleaseMs: 170,
+  gestureReleaseRatio: .62,
+  drawMaxStartSpeed: 460,
   pinchStart: 0.47,
   pinchRelease: 0.62,
   collisionRadius: 26,
@@ -56,6 +61,80 @@ let lastDetectAt = 0;
 let latestHand = null;
 let latestWorldHand = null;
 let activePoints = [];
+
+class OneEuroFilter {
+  constructor(minCutoff = 1.25, beta = .02, derivativeCutoff = 1.0) {
+    this.minCutoff = minCutoff;
+    this.beta = beta;
+    this.derivativeCutoff = derivativeCutoff;
+    this.prevRaw = null;
+    this.prevFiltered = null;
+    this.prevDerivative = 0;
+    this.prevTime = 0;
+  }
+
+  reset() {
+    this.prevRaw = null;
+    this.prevFiltered = null;
+    this.prevDerivative = 0;
+    this.prevTime = 0;
+  }
+
+  alpha(cutoff, dt) {
+    const tau = 1 / (2 * Math.PI * Math.max(.001, cutoff));
+    return 1 / (1 + tau / Math.max(.001, dt));
+  }
+
+  filter(value, nowMs) {
+    if (this.prevRaw == null || !this.prevFiltered) {
+      this.prevRaw = value;
+      this.prevFiltered = value;
+      this.prevTime = nowMs;
+      return value;
+    }
+
+    const dt = Math.max(.008, Math.min(.12, (nowMs - this.prevTime) / 1000));
+    const rawDerivative = (value - this.prevRaw) / dt;
+    const dAlpha = this.alpha(this.derivativeCutoff, dt);
+    this.prevDerivative =
+      dAlpha * rawDerivative + (1 - dAlpha) * this.prevDerivative;
+
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.prevDerivative);
+    const a = this.alpha(cutoff, dt);
+    const filtered = a * value + (1 - a) * this.prevFiltered;
+
+    this.prevRaw = value;
+    this.prevFiltered = filtered;
+    this.prevTime = nowMs;
+    return filtered;
+  }
+}
+
+const landmarkFilters = Array.from({ length: 21 }, () => ({
+  x: new OneEuroFilter(1.25, .025, 1.0),
+  y: new OneEuroFilter(1.25, .025, 1.0),
+  z: new OneEuroFilter(1.10, .030, 1.0),
+}));
+
+function resetLandmarkFilters() {
+  for (const filter of landmarkFilters) {
+    filter.x.reset();
+    filter.y.reset();
+    filter.z.reset();
+  }
+}
+
+function smoothLandmarks(points, nowMs) {
+  if (!points || points.length !== 21) return null;
+
+  return points.map((point, index) => ({
+    x: landmarkFilters[index].x.filter(point.x, nowMs),
+    y: landmarkFilters[index].y.filter(point.y, nowMs),
+    z: point.z == null
+      ? 0
+      : landmarkFilters[index].z.filter(point.z, nowMs),
+  }));
+}
 
 const calibrationCanvas = document.querySelector("#calibrationCanvas");
 const calibrationCtx = calibrationCanvas?.getContext("2d");
@@ -576,12 +655,53 @@ function pinchRatio(hand) {
   return dist(hand[4], hand[8]) / Math.max(.0001, dist(hand[0], hand[9]));
 }
 
-function pinchConfidence(hand) {
-  const ratio = pinchRatio(hand);
-  return clamp01((.62 - ratio) / .24);
+function palmOrientationScore(hand) {
+  if (!hand || hand.length !== 21) return 0;
+
+  const across = normalize3(sub3(hand[17], hand[5]));
+  const towardMiddle = normalize3(sub3(hand[9], hand[0]));
+  const normal = normalize3(cross3(across, towardMiddle));
+  if (!norm3(normal)) return 0;
+
+  // MediaPipe world landmarks are used for depth-aware geometry. We care
+  // about the magnitude of the palm normal along the camera/depth axis;
+  // either normal direction is valid because the hand may be mirrored.
+  return clamp01(Math.abs(dot3(normal, { x: 0, y: 0, z: 1 })));
 }
 
-function classifyGesture(hand) {
+function angleBendScore(angle, openAngle = 170, bendAngle = 105) {
+  return clamp01((openAngle - angle) / (openAngle - bendAngle));
+}
+
+function pinchConfidence(hand) {
+  const ratio = pinchRatio(hand);
+  const tipScore = clamp01((.62 - ratio) / .24);
+
+  const thumbAngle = jointAngle(hand[2], hand[3], hand[4]);
+  const indexPipAngle = jointAngle(hand[5], hand[6], hand[7]);
+  const indexDipAngle = jointAngle(hand[6], hand[7], hand[8]);
+
+  const thumbBend = angleBendScore(thumbAngle, 164, 112);
+  const indexBend = angleBendScore(indexPipAngle, 175, 115);
+  const indexDipBend = angleBendScore(indexDipAngle, 174, 122);
+  const orientation = palmOrientationScore(hand);
+
+  // Tip distance alone is not enough. A valid pinch needs the thumb/index
+  // chains to be approaching each other, plus a plausible palm orientation.
+  const geometryScore =
+    thumbBend * .34 +
+    indexBend * .28 +
+    indexDipBend * .16 +
+    orientation * .22;
+
+  if (orientation < .22 || thumbBend < .08 || indexBend < .08) {
+    return clamp01(tipScore * .38);
+  }
+
+  return clamp01(tipScore * (.58 + geometryScore * .42));
+}
+
+function classifyGesture(hand, motionSpeed = indexSpeed) {
   const f = fingerFlags(hand);
   const pinch = pinchConfidence(hand);
 
@@ -627,11 +747,12 @@ function classifyGesture(hand) {
     f.pinky.curled >= .46;
 
   const deleteQualified =
-    f.pinky.extended >= .62 &&
-    f.pinky.extended - otherExtendedForPinky >= .10 &&
-    f.index.curled >= .46 &&
-    f.middle.curled >= .46 &&
-    f.ring.curled >= .46;
+    f.pinky.extended >= .64 &&
+    f.pinky.extended - otherExtendedForPinky >= .12 &&
+    f.index.curled >= .52 &&
+    f.middle.curled >= .52 &&
+    f.ring.curled >= .52 &&
+    f.thumb <= .62;
 
   const generic = [
     { name: "GRAB", score: pinch },
@@ -660,6 +781,18 @@ function classifyGesture(hand) {
     return { name: "IDLE", score: best.score, margin: best.score - second.score };
   }
 
+  if (
+    best.name === "DRAW" &&
+    motionSpeed > SETTINGS.drawMaxStartSpeed &&
+    stableGesture !== "DRAW"
+  ) {
+    return {
+      name: "IDLE",
+      score: best.score,
+      margin: best.score - second.score,
+    };
+  }
+
   const bestProfile = calibrationProfile[best.name];
   const bestProfileShape = bestProfile ? poseSimilarity(hand, bestProfile.template) : 0;
 
@@ -681,7 +814,41 @@ function classifyGesture(hand) {
 
   return { name: best.name, score: best.score, margin: best.score - second.score };
 }
+let gestureEvidence = [];
+
+function recordGestureEvidence(result, now) {
+  gestureEvidence.push({
+    name: result.name,
+    score: result.score,
+    margin: result.margin,
+    t: now,
+  });
+
+  while (
+    gestureEvidence.length &&
+    now - gestureEvidence[0].t > SETTINGS.gestureWindowMs
+  ) {
+    gestureEvidence.shift();
+  }
+}
+
+function gestureWindowPass(target, now, ratio = SETTINGS.gestureWindowRatio) {
+  const window = gestureEvidence.filter(sample => now - sample.t <= SETTINGS.gestureWindowMs);
+  if (window.length < SETTINGS.gestureWindowMinSamples) return false;
+
+  const qualifying = window.filter(
+    sample =>
+      sample.name === target &&
+      sample.score >= .60 &&
+      sample.margin >= .10
+  );
+
+  return qualifying.length / window.length >= ratio;
+}
+
 function commitGesture(result, now) {
+  recordGestureEvidence(result, now);
+
   const next = result.name;
   const confidence = result.score;
 
@@ -694,21 +861,51 @@ function commitGesture(result, now) {
   if (next !== gestureCandidate) {
     gestureCandidate = next;
     gestureCandidateAt = now;
+  }
+
+  if (next !== "IDLE") {
+    // Entry requires a real temporal majority, not a single good frame.
+    if (!gestureWindowPass(next, now)) return;
+
+    const requiredHold =
+      next === "GRAB" && confidence > .82 ? 44 :
+      confidence > .78 ? 58 :
+      82;
+
+    if (now - gestureCandidateAt >= requiredHold) {
+      const previous = stableGesture;
+      stableGesture = next;
+      onGestureChanged(previous, next);
+      gestureEvidence = [];
+    }
     return;
   }
 
-  const requiredHold =
-    next === "GRAB" && confidence > .82 ? 34 :
-    confidence > .80 ? 42 :
-    confidence > .70 ? 62 :
-    95;
+  // Release is also buffered so a one-frame landmark wobble does not break a
+  // drawing stroke. Any strong competing gesture uses its own 300ms window.
+  const recent = gestureEvidence.filter(
+    sample => now - sample.t <= SETTINGS.gestureReleaseMs
+  );
+  const nonGesture = recent.filter(sample => sample.name === "IDLE").length;
+  const releaseReady =
+    recent.length >= 4 &&
+    nonGesture / recent.length >= SETTINGS.gestureReleaseRatio;
 
-  if (now - gestureCandidateAt >= requiredHold) {
+  if (
+    stableGesture !== "IDLE" &&
+    releaseReady &&
+    now - gestureCandidateAt >= SETTINGS.gestureReleaseMs
+  ) {
     const previous = stableGesture;
-    stableGesture = next;
-    onGestureChanged(previous, next);
+    stableGesture = "IDLE";
+    onGestureChanged(previous, "IDLE");
+    gestureEvidence = [];
   }
 }
+
+let indexSpeed = 0;
+let indexSpeedPoint = null;
+let indexSpeedAt = 0;
 
 function resetMotionFilter() {
   rawPoint = null;
@@ -718,6 +915,32 @@ function resetMotionFilter() {
   motionSamples = [];
   lastCurvature = 0;
   lastSpeed = 0;
+  indexSpeed = 0;
+  indexSpeedPoint = null;
+  indexSpeedAt = 0;
+}
+
+function updateIndexSpeed(point, now) {
+  if (!point) {
+    indexSpeed = 0;
+    indexSpeedPoint = null;
+    indexSpeedAt = 0;
+    return 0;
+  }
+
+  if (!indexSpeedPoint) {
+    indexSpeedPoint = { ...point };
+    indexSpeedAt = now;
+    indexSpeed = 0;
+    return 0;
+  }
+
+  const dt = Math.max(.01, Math.min(.12, (now - indexSpeedAt) / 1000));
+  const raw = Math.hypot(point.x - indexSpeedPoint.x, point.y - indexSpeedPoint.y) / dt;
+  indexSpeed = indexSpeed * .72 + raw * .28;
+  indexSpeedPoint = { ...point };
+  indexSpeedAt = now;
+  return indexSpeed;
 }
 
 function onGestureChanged(prev, next) {
@@ -1707,6 +1930,7 @@ function updateInteraction(now) {
     activePoints = latestHand.map(p => displayPoint(p.x, p.y));
 
     const indexPoint = activePoints[8];
+    updateIndexSpeed(indexPoint, now);
     const pinchPoint = midpoint(activePoints[4], activePoints[8]);
 
     if (stableGesture === "GRAB") {
@@ -1722,7 +1946,10 @@ function updateInteraction(now) {
   }
 
   if (latestHand) {
-    commitGesture(classifyGesture(latestWorldHand || latestHand), now);
+    commitGesture(
+      classifyGesture(latestWorldHand || latestHand, indexSpeed),
+      now
+    );
   } else if (now - lastSampleAt > SETTINGS.lostGraceMs) {
     stableGesture = "IDLE";
     gestureCandidate = "IDLE";
@@ -1776,12 +2003,22 @@ function processVideo(now) {
 
   try {
     const result = landmarker.detectForVideo(video, now);
-    latestHand = result.landmarks?.[0] || null;
-    latestWorldHand = result.worldLandmarks?.[0] || latestHand;
+    const rawImageHand = result.landmarks?.[0] || null;
+    const rawWorldHand = result.worldLandmarks?.[0] || rawImageHand;
+
+    if (rawImageHand && rawWorldHand) {
+      latestHand = smoothLandmarks(rawImageHand, now);
+      latestWorldHand = smoothLandmarks(rawWorldHand, now);
+    } else {
+      latestHand = null;
+      latestWorldHand = null;
+      resetLandmarkFilters();
+    }
   } catch (error) {
     console.warn("Hand detection failed", error);
     latestHand = null;
     latestWorldHand = null;
+    resetLandmarkFilters();
   }
 }
 
@@ -1864,6 +2101,11 @@ async function start() {
     calibrationLastExpected = null;
     calibrationLastConfidence = 0;
     calibrationGuideGesture = null;
+    resetLandmarkFilters();
+    gestureEvidence = [];
+    indexSpeed = 0;
+    indexSpeedPoint = null;
+    indexSpeedAt = 0;
     for (const key of Object.keys(calibrationProfile)) delete calibrationProfile[key];
     calibrationScreen?.classList.remove("hidden");
     resizeCanvas();
