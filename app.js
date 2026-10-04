@@ -59,38 +59,110 @@ let activePoints = [];
 
 const calibrationCanvas = document.querySelector("#calibrationCanvas");
 const calibrationCtx = calibrationCanvas?.getContext("2d");
+const calibrationOverlayCanvas = document.querySelector("#calibrationOverlayCanvas");
+const calibrationOverlayCtx = calibrationOverlayCanvas?.getContext("2d");
 const calibrationScreen = document.querySelector("#calibrationScreen");
 const calibrationTitle = document.querySelector("#calibrationTitle");
 const calibrationText = document.querySelector("#calibrationText");
 const calibrationMeterFill = document.querySelector("#calibrationMeterFill");
 const calibrationStep = document.querySelector("#calibrationStep");
+const calibrationConfirm = document.querySelector("#calibrationConfirm");
+const calibrationPoseTitle = document.querySelector("#calibrationPoseTitle");
+const calibrationPose = document.querySelector("#calibrationPose");
+const calibrationFeedback = document.querySelector("#calibrationFeedback");
+const checkHand = document.querySelector("#checkHand");
+const checkShape = document.querySelector("#checkShape");
+const checkDepth = document.querySelector("#checkDepth");
+const checkStability = document.querySelector("#checkStability");
+const checkPersonal = document.querySelector("#checkPersonal");
 
 let calibrationActive = false;
 let calibrationIndex = 0;
 let calibrationHoldStarted = 0;
-const calibrationHoldMs = 680;
+let calibrationSamples = [];
+let calibrationRecentPoses = [];
+let calibrationRecentScales = [];
+const calibrationHoldMs = 900;
+
 const calibrationSteps = [
   {
     gesture: "TRACK",
-    title: "Open your hand",
-    text: "Spread all five fingers and hold them naturally inside the camera view."
+    title: "Step 1 · Open your hand",
+    text: "Show your whole hand to the live camera. Spread all five fingers naturally and keep the palm facing the camera.",
+    guide: {
+      thumb: "OPEN",
+      index: "OPEN",
+      middle: "OPEN",
+      ring: "OPEN",
+      pinky: "OPEN",
+    },
   },
   {
     gesture: "GRAB",
-    title: "Pinch thumb + index",
-    text: "Touch the thumb tip to the index tip and hold. This becomes the move gesture."
+    title: "Step 2 · Pinch to move",
+    text: "Touch thumb tip to index tip. Keep the other three fingers folded. Hold the pinch still.",
+    guide: {
+      thumb: "PINCH",
+      index: "PINCH",
+      middle: "BENT",
+      ring: "BENT",
+      pinky: "BENT",
+    },
   },
   {
     gesture: "DELETE",
-    title: "Raise only your pinky",
-    text: "Keep index, middle and ring folded. Hold the pinky up. This is single-object select/delete."
+    title: "Step 3 · Pinky selects",
+    text: "Raise only your pinky. Fold index, middle and ring. Let the thumb stay relaxed. Hold without waving.",
+    guide: {
+      thumb: "RELAX",
+      index: "BENT",
+      middle: "BENT",
+      ring: "BENT",
+      pinky: "OPEN",
+    },
   },
   {
     gesture: "DRAW",
-    title: "Raise only your index",
-    text: "Keep the other fingers folded. Hold the index up. This is the drawing gesture."
-  }
+    title: "Step 4 · Index draws",
+    text: "Raise only your index. Fold middle, ring and pinky. Let the thumb stay relaxed. Hold without waving.",
+    guide: {
+      thumb: "RELAX",
+      index: "OPEN",
+      middle: "BENT",
+      ring: "BENT",
+      pinky: "BENT",
+    },
+  },
 ];
+
+const calibrationProfile = Object.create(null);
+let calibrationLastExpected = null;
+let calibrationLastConfidence = 0;
+
+function setupCalibrationPoseGuide(step) {
+  if (!calibrationPose) return;
+
+  const labels = [
+    ["thumb", "THUMB"],
+    ["index", "INDEX"],
+    ["middle", "MIDDLE"],
+    ["ring", "RING"],
+    ["pinky", "PINKY"],
+  ];
+
+  calibrationPose.innerHTML = labels.map(([key, label]) => {
+    const state = step.guide[key];
+    const cls = state === "BENT" ? "bend" : state === "PINCH" ? "pinch" : "";
+    return '<div class="finger-guide ' + cls + '">' +
+      '<div class="finger-name">' + label + '</div>' +
+      '<div class="finger-state">' + state + '</div>' +
+    '</div>';
+  }).join("");
+
+  if (calibrationPoseTitle) {
+    calibrationPoseTitle.textContent = "DO THIS · THEN HOLD STILL";
+  }
+}
 
 let stableGesture = "IDLE";
 let gestureCandidate = "IDLE";
@@ -144,6 +216,7 @@ function resizeCanvas() {
 
   drawCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
   fxCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  resizeCalibrationOverlay();
   drawCtx.lineCap = "round";
   drawCtx.lineJoin = "round";
   fxCtx.lineCap = "round";
@@ -191,6 +264,200 @@ function jointAngle(a, b, c) {
 function clamp01(value) {
   return Math.max(0, Math.min(1, value));
 }
+
+
+function sub3(a, b) {
+  return { x: a.x - b.x, y: a.y - b.y, z: (a.z || 0) - (b.z || 0) };
+}
+
+function add3(a, b) {
+  return { x: a.x + b.x, y: a.y + b.y, z: (a.z || 0) + (b.z || 0) };
+}
+
+function mul3(v, scalar) {
+  return { x: v.x * scalar, y: v.y * scalar, z: (v.z || 0) * scalar };
+}
+
+function dot3(a, b) {
+  return a.x * b.x + a.y * b.y + (a.z || 0) * (b.z || 0);
+}
+
+function cross3(a, b) {
+  return {
+    x: a.y * (b.z || 0) - (a.z || 0) * b.y,
+    y: a.z * b.x - a.x * (b.z || 0),
+    z: a.x * b.y - a.y * b.x,
+  };
+}
+
+function norm3(v) {
+  return Math.hypot(v.x, v.y, v.z || 0);
+}
+
+function normalize3(v) {
+  const length = norm3(v);
+  return length > 1e-6 ? mul3(v, 1 / length) : { x: 0, y: 0, z: 0 };
+}
+
+// Canonical 3D pose: wrist-centered, palm-axis aligned, scale-normalized.
+// This makes the learned template substantially less sensitive to camera
+// position, hand size, and in-plane rotation while keeping finger geometry.
+function canonicalHand(hand) {
+  if (!hand || hand.length !== 21 || hand.some(p => p.z == null)) return null;
+
+  const origin = hand[0];
+  const palmAcross = normalize3(sub3(hand[17], hand[5]));
+  let palmForward = sub3(hand[9], origin);
+  palmForward = sub3(palmForward, mul3(palmAcross, dot3(palmForward, palmAcross)));
+  palmForward = normalize3(palmForward);
+
+  let palmNormal = normalize3(cross3(palmAcross, palmForward));
+  const scale = Math.max(.0001, dist(hand[5], hand[17]));
+
+  if (!norm3(palmForward) || !norm3(palmNormal)) return null;
+
+  const flat = [];
+  for (const point of hand) {
+    const rel = sub3(point, origin);
+    flat.push(
+      dot3(rel, palmAcross) / scale,
+      dot3(rel, palmForward) / scale,
+      dot3(rel, palmNormal) / scale
+    );
+  }
+  return flat;
+}
+
+function poseRms(a, b) {
+  if (!a || !b || a.length !== b.length) return 1;
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) {
+    const delta = a[i] - b[i];
+    sum += delta * delta;
+  }
+  return Math.sqrt(sum / a.length);
+}
+
+function poseSimilarity(hand, template) {
+  const vector = canonicalHand(hand);
+  if (!vector || !template) return 0;
+  return clamp01(1 - poseRms(vector, template) / .24);
+}
+
+function averageVectors(vectors) {
+  if (!vectors.length) return null;
+  const out = new Array(vectors[0].length).fill(0);
+  for (const vector of vectors) {
+    for (let i = 0; i < out.length; i++) out[i] += vector[i];
+  }
+  for (let i = 0; i < out.length; i++) out[i] /= vectors.length;
+  return out;
+}
+
+function handImageQuality(hand) {
+  if (!hand || hand.length !== 21) return 0;
+
+  let inside = 0;
+  for (const point of hand) {
+    if (point.x > .02 && point.x < .98 && point.y > .02 && point.y < .98) inside++;
+  }
+
+  const palmScale = dist(hand[5], hand[17]);
+  const scaleScore =
+    clamp01((palmScale - .05) / .045) *
+    clamp01((.22 - palmScale) / .10);
+
+  return clamp01((inside / 21) * .72 + scaleScore * .28);
+}
+
+function calibrationStabilityScore(hand) {
+  const pose = canonicalHand(hand);
+  if (!pose || !calibrationRecentPoses.length) return 0.58;
+
+  const previous = calibrationRecentPoses[calibrationRecentPoses.length - 1];
+  const jitter = poseRms(pose, previous);
+  return clamp01(1 - jitter / .055);
+}
+
+function calibrationDepthScore(hand) {
+  if (!hand || hand.length !== 21 || hand.some(p => p.z == null)) return 0;
+
+  const zValues = hand.map(p => p.z);
+  const zRange = Math.max(...zValues) - Math.min(...zValues);
+  const palmScale = dist(hand[5], hand[17]);
+  const depthStructure = clamp01(zRange / Math.max(.025, palmScale * .7));
+  const scaleHealth =
+    clamp01((palmScale - .045) / .04) *
+    clamp01((.22 - palmScale) / .10);
+
+  return clamp01(depthStructure * .72 + scaleHealth * .28);
+}
+
+function captureCalibrationSample(gesture, hand) {
+  const pose = canonicalHand(hand);
+  if (!pose) return;
+
+  const f = fingerFlags(hand);
+  calibrationSamples.push({
+    pose,
+    palmScale: dist(hand[5], hand[17]),
+    pinchRatio: pinchRatio(hand),
+    extended: {
+      index: f.index.extended,
+      middle: f.middle.extended,
+      ring: f.ring.extended,
+      pinky: f.pinky.extended,
+      thumb: f.thumb,
+    },
+    curled: {
+      index: f.index.curled,
+      middle: f.middle.curled,
+      ring: f.ring.curled,
+      pinky: f.pinky.curled,
+    },
+    gesture,
+  });
+
+  if (calibrationSamples.length > 36) calibrationSamples.shift();
+}
+
+function learnCalibrationProfile(gesture) {
+  if (!calibrationSamples.length) return;
+
+  const pose = averageVectors(calibrationSamples.map(sample => sample.pose));
+  const average = key => calibrationSamples.reduce((sum, sample) => sum + sample[key], 0) / calibrationSamples.length;
+
+  const meanExtended = {};
+  const meanCurled = {};
+  for (const finger of ["thumb", "index", "middle", "ring", "pinky"]) {
+    meanExtended[finger] = calibrationSamples.reduce(
+      (sum, sample) => sum + sample.extended[finger], 0
+    ) / calibrationSamples.length;
+  }
+  for (const finger of ["index", "middle", "ring", "pinky"]) {
+    meanCurled[finger] = calibrationSamples.reduce(
+      (sum, sample) => sum + sample.curled[finger], 0
+    ) / calibrationSamples.length;
+  }
+
+  calibrationProfile[gesture] = {
+    template: pose,
+    palmScale: average("palmScale"),
+    pinchRatio: average("pinchRatio"),
+    extended: meanExtended,
+    curled: meanCurled,
+    sampleCount: calibrationSamples.length,
+  };
+}
+
+function personalizedScore(hand, gesture, genericScore) {
+  const profile = calibrationProfile[gesture];
+  if (!profile) return genericScore;
+
+  const shape = poseSimilarity(hand, profile.template);
+  return clamp01(genericScore * .52 + shape * .48);
+}
+
 
 function fingerGeometry(hand, mcp, pip, dip, tip) {
   const palm = Math.max(.0001, dist(hand[0], hand[9]));
@@ -267,10 +534,6 @@ function classifyGesture(hand) {
   const f = fingerFlags(hand);
   const pinch = pinchConfidence(hand);
 
-  // Hard anatomical separation prevents accidental overlap:
-  // draw = index is clearly the dominant extended finger;
-  // delete = pinky is clearly the dominant extended finger;
-  // grab = thumb/index tips are actually pinching.
   const otherExtendedForIndex = Math.max(
     f.middle.extended,
     f.ring.extended,
@@ -288,18 +551,14 @@ function classifyGesture(hand) {
     f.middle.curled,
     f.ring.curled,
     f.pinky.curled
-  ) * (
-    1 - pinch * .95
-  );
+  ) * (1 - pinch * .95);
 
   const deleteScore = Math.min(
     f.pinky.extended,
     f.index.curled,
     f.middle.curled,
     f.ring.curled
-  ) * (
-    1 - pinch * .95
-  );
+  ) * (1 - pinch * .95);
 
   const trackScore = Math.min(
     f.thumb,
@@ -323,36 +582,31 @@ function classifyGesture(hand) {
     f.middle.curled >= .46 &&
     f.ring.curled >= .46;
 
-  const ranked = [
+  const generic = [
     { name: "GRAB", score: pinch },
     { name: "DRAW", score: drawQualified ? Math.max(drawScore, .64) : drawScore },
     { name: "DELETE", score: deleteQualified ? Math.max(deleteScore, .64) : deleteScore },
     { name: "TRACK", score: trackScore },
-  ].sort((a, b) => b.score - a.score);
+  ];
+
+  const ranked = generic.map(item => ({
+    name: item.name,
+    score: personalizedScore(hand, item.name, item.score),
+  })).sort((a, b) => b.score - a.score);
 
   const best = ranked[0];
   const second = ranked[1];
 
   if (best.name === "GRAB" && best.score >= .62) {
-    return {
-      name: "GRAB",
-      score: best.score,
-      margin: best.score - second.score,
-    };
+    return { name: "GRAB", score: best.score, margin: best.score - second.score };
   }
 
   if (best.score < .56) {
     return { name: "IDLE", score: best.score, margin: best.score };
   }
 
-  // Ambiguous frames do not switch gesture modes. The current stable mode
-  // is allowed to persist until the anatomy becomes clearly different.
   if (best.score - second.score < .13) {
-    return {
-      name: "IDLE",
-      score: best.score,
-      margin: best.score - second.score,
-    };
+    return { name: "IDLE", score: best.score, margin: best.score - second.score };
   }
 
   if (best.name === "DRAW" && !drawQualified) {
@@ -363,13 +617,8 @@ function classifyGesture(hand) {
     return { name: "IDLE", score: best.score, margin: best.score - second.score };
   }
 
-  return {
-    name: best.name,
-    score: best.score,
-    margin: best.score - second.score,
-  };
+  return { name: best.name, score: best.score, margin: best.score - second.score };
 }
-
 function commitGesture(result, now) {
   const next = result.name;
   const confidence = result.score;
@@ -855,6 +1104,106 @@ function emitParticles(point, speed, curvature) {
 }
 
 
+function resizeCalibrationOverlay() {
+  if (!calibrationOverlayCanvas) return;
+  const { width, height } = size();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  calibrationOverlayCanvas.width = Math.max(1, Math.round(width * dpr));
+  calibrationOverlayCanvas.height = Math.max(1, Math.round(height * dpr));
+  calibrationOverlayCanvas.style.width = width + "px";
+  calibrationOverlayCanvas.style.height = height + "px";
+  calibrationOverlayCtx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function drawCalibrationCameraGuide(hand) {
+  if (!calibrationOverlayCtx || !calibrationOverlayCanvas) return;
+
+  const { width, height } = size();
+  calibrationOverlayCtx.clearRect(0, 0, width, height);
+  calibrationOverlayCtx.save();
+
+  calibrationOverlayCtx.fillStyle = "rgba(0,0,0,.12)";
+  calibrationOverlayCtx.fillRect(0, 0, width, height);
+
+  calibrationOverlayCtx.strokeStyle = "rgba(41,232,212,.35)";
+  calibrationOverlayCtx.lineWidth = 1.3;
+  const frameW = Math.min(width * .84, 1040);
+  const frameH = Math.min(height * .72, 710);
+  const fx = (width - frameW) * .5;
+  const fy = (height - frameH) * .5 + 14;
+  calibrationOverlayCtx.setLineDash([8, 10]);
+  calibrationOverlayCtx.strokeRect(fx, fy, frameW, frameH);
+  calibrationOverlayCtx.setLineDash([]);
+
+  calibrationOverlayCtx.fillStyle = "rgba(41,232,212,.72)";
+  calibrationOverlayCtx.font = "700 10px Inter, system-ui, sans-serif";
+  calibrationOverlayCtx.letterSpacing = "2px";
+  calibrationOverlayCtx.fillText("LIVE CAMERA · KEEP WHOLE HAND INSIDE FRAME", fx, fy - 10);
+
+  if (!hand || hand.length !== 21) {
+    calibrationOverlayCtx.restore();
+    return;
+  }
+
+  const points = hand.map(p => ({
+    x: width - p.x * width,
+    y: p.y * height,
+  }));
+
+  const bounds = points.reduce((acc, p) => ({
+    minX: Math.min(acc.minX, p.x),
+    minY: Math.min(acc.minY, p.y),
+    maxX: Math.max(acc.maxX, p.x),
+    maxY: Math.max(acc.maxY, p.y),
+  }), { minX: width, minY: height, maxX: 0, maxY: 0 });
+
+  const center = {
+    x: (bounds.minX + bounds.maxX) * .5,
+    y: (bounds.minY + bounds.maxY) * .5,
+  };
+
+  calibrationOverlayCtx.strokeStyle = "rgba(41,232,212,.88)";
+  calibrationOverlayCtx.shadowColor = "#29E8D4";
+  calibrationOverlayCtx.shadowBlur = 10;
+  calibrationOverlayCtx.lineWidth = 2;
+
+  for (const [a, b] of CONNECTIONS) {
+    calibrationOverlayCtx.beginPath();
+    calibrationOverlayCtx.moveTo(points[a].x, points[a].y);
+    calibrationOverlayCtx.lineTo(points[b].x, points[b].y);
+    calibrationOverlayCtx.stroke();
+  }
+
+  calibrationOverlayCtx.shadowBlur = 0;
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    calibrationOverlayCtx.beginPath();
+    calibrationOverlayCtx.fillStyle =
+      i === 8 ? COLORS.draw :
+      i === 20 ? COLORS.hover :
+      COLORS.handPoint;
+    calibrationOverlayCtx.arc(p.x, p.y, i === 8 || i === 20 ? 5 : 3, 0, Math.PI * 2);
+    calibrationOverlayCtx.fill();
+  }
+
+  calibrationOverlayCtx.strokeStyle = "rgba(216,255,90,.42)";
+  calibrationOverlayCtx.beginPath();
+  calibrationOverlayCtx.arc(center.x, center.y, 42 + Math.min(38, (bounds.maxX - bounds.minX) * .12), 0, Math.PI * 2);
+  calibrationOverlayCtx.stroke();
+
+  calibrationOverlayCtx.fillStyle = "rgba(0,0,0,.55)";
+  calibrationOverlayCtx.fillRect(center.x - 47, center.y - 18, 94, 36);
+  calibrationOverlayCtx.fillStyle = "#D8FF5A";
+  calibrationOverlayCtx.textAlign = "center";
+  calibrationOverlayCtx.font = "700 10px Inter, system-ui, sans-serif";
+  calibrationOverlayCtx.fillText("HAND LOCKED", center.x, center.y - 2);
+  calibrationOverlayCtx.font = "600 8px Inter, system-ui, sans-serif";
+  calibrationOverlayCtx.fillStyle = "rgba(238,254,250,.72)";
+  calibrationOverlayCtx.fillText("3D + TIME + SHAPE", center.x, center.y + 11);
+
+  calibrationOverlayCtx.restore();
+}
+
 function projectWorldPoint(point, center) {
   let x = (point.x - center.x) * 860;
   let y = (point.y - center.y) * 860;
@@ -920,11 +1269,6 @@ function draw3DPreview(hand) {
 
   const projected = hand.map(point => projectWorldPoint(point, center));
 
-  const orderedConnections = [...CONNECTIONS].sort(
-    (a, b) => ((projected[a[0]].depth + projected[a[1]].depth) * .5)
-            - ((projected[b[0]].depth + projected[b[1]].depth) * .5)
-  );
-
   calibrationCtx.lineCap = "round";
   calibrationCtx.lineJoin = "round";
   calibrationCtx.shadowColor = "#29E8D4";
@@ -932,7 +1276,7 @@ function draw3DPreview(hand) {
   calibrationCtx.lineWidth = 2.4;
   calibrationCtx.strokeStyle = "rgba(41,232,212,.82)";
 
-  for (const [a, b] of orderedConnections) {
+  for (const [a, b] of CONNECTIONS) {
     calibrationCtx.beginPath();
     calibrationCtx.moveTo(projected[a].x, projected[a].y);
     calibrationCtx.lineTo(projected[b].x, projected[b].y);
@@ -943,17 +1287,21 @@ function draw3DPreview(hand) {
 
   for (let i = 0; i < projected.length; i++) {
     const p = projected[i];
-    const size = 3.2 + p.depth * 1.7;
+    const pointSize = 3.2 + p.depth * 1.7;
 
     calibrationCtx.beginPath();
     calibrationCtx.fillStyle = i === 8
-      ? "#FF4F91"
+      ? COLORS.draw
       : i === 20
-        ? "#D8FF5A"
-        : "#85FFF3";
-    calibrationCtx.arc(p.x, p.y, Math.max(2.2, size), 0, Math.PI * 2);
+        ? COLORS.hover
+        : COLORS.handPoint;
+    calibrationCtx.arc(p.x, p.y, Math.max(2.2, pointSize), 0, Math.PI * 2);
     calibrationCtx.fill();
   }
+
+  calibrationCtx.fillStyle = "rgba(238,254,250,.54)";
+  calibrationCtx.font = "700 9px Inter, system-ui, sans-serif";
+  calibrationCtx.fillText("TRUE 3D WORLD LANDMARKS", 12, 18);
 
   calibrationCtx.restore();
 }
@@ -961,44 +1309,124 @@ function draw3DPreview(hand) {
 function updateCalibration(now) {
   if (!calibrationActive) return;
 
-  draw3DPreview(latestWorldHand);
-
   const step = calibrationSteps[calibrationIndex];
   if (!step) return;
 
+  setupCalibrationPoseGuide(step);
+  drawCalibrationCameraGuide(latestHand);
+  draw3DPreview(latestWorldHand);
+
+  calibrationStep.textContent = "STEP " + (calibrationIndex + 1) + " / " + calibrationSteps.length;
   calibrationTitle.textContent = step.title;
-  calibrationText.textContent = latestWorldHand
-    ? step.text
-    : "Move your whole hand into the camera view. The 3D preview will appear automatically.";
-  calibrationStep.textContent = (calibrationIndex + 1) + " / " + calibrationSteps.length;
+  calibrationText.textContent = step.text;
 
-  let confidence = 0;
+  const handScore = handImageQuality(latestHand);
+  const shapeResult = latestWorldHand ? classifyGestureBeforeCalibration(latestWorldHand) : { name: "IDLE", score: 0 };
+  const shapeScore = shapeResult.name === step.gesture ? shapeResult.score : 0;
+  const depthScore = calibrationDepthScore(latestWorldHand);
+  const stabilityScore = calibrationStabilityScore(latestWorldHand);
 
-  if (latestWorldHand) {
-    const result = classifyGesture(latestWorldHand);
-    confidence = result.name === step.gesture ? result.score : 0;
+  const centered = latestHand?.length === 21
+    ? clamp01(1 - Math.hypot(
+        ((latestHand.reduce((s, p) => s + p.x, 0) / 21) - .5) / .42,
+        ((latestHand.reduce((s, p) => s + p.y, 0) / 21) - .5) / .48
+      ))
+    : 0;
+
+  const personalScore = calibrationProfile[step.gesture] ? 1 : calibrationSamples.length ? .62 : .45;
+  const overall = handScore * .30 + shapeScore * .30 + depthScore * .15 + stabilityScore * .15 + centered * .10;
+
+  const ready =
+    handScore >= .58 &&
+    shapeScore >= .68 &&
+    depthScore >= .42 &&
+    stabilityScore >= .64 &&
+    centered >= .42;
+
+  if (latestWorldHand && canonicalHand(latestWorldHand)) {
+    calibrationRecentPoses.push(canonicalHand(latestWorldHand));
+    if (calibrationRecentPoses.length > 12) calibrationRecentPoses.shift();
+
+    calibrationRecentScales.push(dist(latestWorldHand[5], latestWorldHand[17]));
+    if (calibrationRecentScales.length > 18) calibrationRecentScales.shift();
   }
 
-  if (confidence >= .68) {
-    if (!calibrationHoldStarted) calibrationHoldStarted = now;
+  if (ready) {
+    if (!calibrationHoldStarted) {
+      calibrationHoldStarted = now;
+      calibrationSamples = [];
+    }
+    captureCalibrationSample(step.gesture, latestWorldHand);
   } else {
     calibrationHoldStarted = 0;
+    calibrationSamples = [];
   }
 
   const progress = calibrationHoldStarted
     ? Math.max(0, Math.min(1, (now - calibrationHoldStarted) / calibrationHoldMs))
     : 0;
 
-  if (calibrationMeterFill) {
-    calibrationMeterFill.style.width = Math.round(progress * 100) + "%";
+  calibrationMeterFill.style.width = Math.round(progress * 100) + "%";
+
+  const setCheck = (node, value, good) => {
+    if (!node) return;
+    node.textContent = value;
+    node.parentElement?.classList.toggle("good", good);
+    node.parentElement?.classList.toggle("bad", !good && value !== "—");
+  };
+
+  setCheck(checkHand,
+    handScore >= .58 ? "VISIBLE" : "SEARCHING",
+    handScore >= .58
+  );
+  setCheck(checkShape,
+    shapeScore >= .68 ? Math.round(shapeScore * 100) + "% MATCH" : "MATCH THE GUIDE",
+    shapeScore >= .68
+  );
+  setCheck(checkDepth,
+    depthScore >= .42 ? "3D OK" : "SHOW PALM",
+    depthScore >= .42
+  );
+  setCheck(checkStability,
+    stabilityScore >= .64 ? "STEADY" : "HOLD STILL",
+    stabilityScore >= .64
+  );
+  setCheck(checkPersonal,
+    calibrationProfile[step.gesture] ? "LEARNED" : "LEARNING",
+    Boolean(calibrationProfile[step.gesture])
+  );
+
+  calibrationConfirm.classList.toggle("good", ready);
+  calibrationConfirm.classList.toggle("bad", !ready);
+
+  if (!latestHand) {
+    calibrationConfirm.textContent = "WAITING FOR HAND";
+    calibrationFeedback.textContent = "Move your whole hand into the live camera frame.";
+  } else if (shapeScore < .68) {
+    calibrationConfirm.textContent = "NOT MATCHED YET";
+    calibrationFeedback.textContent = "Follow the finger guide exactly. TUFF needs the correct pose, not just a similar pose.";
+  } else if (depthScore < .42) {
+    calibrationConfirm.textContent = "3D VIEW NEEDS MORE DATA";
+    calibrationFeedback.textContent = "Keep the whole hand visible and avoid covering fingertips.";
+  } else if (stabilityScore < .64) {
+    calibrationConfirm.textContent = "HOLD STEADY";
+    calibrationFeedback.textContent = "Good pose. Stop moving for the confirmation countdown.";
+  } else {
+    calibrationConfirm.textContent = Math.round(overall * 100) + "% · READY";
+    calibrationFeedback.textContent = "Confirmed when the bar reaches 100%. Keep the same pose.";
   }
 
   if (progress >= 1) {
+    learnCalibrationProfile(step.gesture);
     calibrationIndex += 1;
     calibrationHoldStarted = 0;
+    calibrationSamples = [];
+    calibrationRecentPoses = [];
+    calibrationRecentScales = [];
 
     if (calibrationIndex >= calibrationSteps.length) {
       calibrationActive = false;
+      stage.classList.remove("calibrating");
       calibrationScreen?.classList.add("hidden");
       stableGesture = "IDLE";
       gestureCandidate = "IDLE";
@@ -1006,6 +1434,44 @@ function updateCalibration(now) {
       resetMotionFilter();
     }
   }
+}
+
+function classifyGestureBeforeCalibration(hand) {
+  // Calibration must never use the user's learned profile while that profile
+  // is still being collected. Recreate the anatomical-only ranking here.
+  const f = fingerFlags(hand);
+  const pinch = pinchConfidence(hand);
+
+  const drawScore = Math.min(
+    f.index.extended,
+    f.middle.curled,
+    f.ring.curled,
+    f.pinky.curled
+  ) * (1 - pinch * .95);
+
+  const deleteScore = Math.min(
+    f.pinky.extended,
+    f.index.curled,
+    f.middle.curled,
+    f.ring.curled
+  ) * (1 - pinch * .95);
+
+  const trackScore = Math.min(
+    f.thumb,
+    f.index.extended,
+    f.middle.extended,
+    f.ring.extended,
+    f.pinky.extended
+  ) * (1 - pinch);
+
+  const ranked = [
+    { name: "GRAB", score: pinch },
+    { name: "DRAW", score: drawScore },
+    { name: "DELETE", score: deleteScore },
+    { name: "TRACK", score: trackScore },
+  ].sort((a, b) => b.score - a.score);
+
+  return ranked[0];
 }
 
 function drawEffects(dt) {
@@ -1293,10 +1759,17 @@ async function start() {
     landmarker = await createLandmarker();
     running = true;
     startScreen.classList.add("hidden");
+    stage.classList.add("calibrating");
 
     calibrationActive = true;
     calibrationIndex = 0;
     calibrationHoldStarted = 0;
+    calibrationSamples = [];
+    calibrationRecentPoses = [];
+    calibrationRecentScales = [];
+    calibrationLastExpected = null;
+    calibrationLastConfidence = 0;
+    for (const key of Object.keys(calibrationProfile)) delete calibrationProfile[key];
     calibrationScreen?.classList.remove("hidden");
     resizeCanvas();
   } catch (error) {
