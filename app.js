@@ -1611,6 +1611,7 @@ function updateCalibration(now) {
       calibrationConfirm.textContent = "✓ CONFIRMED";
       calibrationConfirm.classList.add("good");
       calibrationConfirm.classList.remove("bad");
+      calibrationConfirm.classList.remove("calibration-confirm-hidden");
       calibrationFeedback.textContent =
         calibrationIndex === calibrationSteps.length - 1
           ? "Final hand profile captured. Starting the canvas next."
@@ -1727,9 +1728,10 @@ function updateCalibration(now) {
 
   calibrationConfirm.classList.toggle("good", ready);
   calibrationConfirm.classList.toggle("bad", !ready);
+  calibrationConfirm.classList.toggle("calibration-confirm-hidden", !latestHand);
 
   if (!latestHand) {
-    calibrationConfirm.textContent = "WAITING FOR HAND";
+    calibrationConfirm.textContent = "";
     calibrationFeedback.textContent = "Move your whole hand into the live camera frame.";
   } else if (shapeScore < .68) {
     calibrationConfirm.textContent = "NOT MATCHED YET";
@@ -1751,6 +1753,7 @@ function updateCalibration(now) {
     calibrationConfirm.textContent = "✓ CONFIRMED";
     calibrationConfirm.classList.add("good");
     calibrationConfirm.classList.remove("bad");
+    calibrationConfirm.classList.remove("calibration-confirm-hidden");
     calibrationFeedback.textContent =
       calibrationIndex === calibrationSteps.length - 1
         ? "Final pose saved. Your personal 3D profile is ready."
