@@ -54,7 +54,43 @@ let running = false;
 let lastVideoTime = -1;
 let lastDetectAt = 0;
 let latestHand = null;
+let latestWorldHand = null;
 let activePoints = [];
+
+const calibrationCanvas = document.querySelector("#calibrationCanvas");
+const calibrationCtx = calibrationCanvas?.getContext("2d");
+const calibrationScreen = document.querySelector("#calibrationScreen");
+const calibrationTitle = document.querySelector("#calibrationTitle");
+const calibrationText = document.querySelector("#calibrationText");
+const calibrationMeterFill = document.querySelector("#calibrationMeterFill");
+const calibrationStep = document.querySelector("#calibrationStep");
+
+let calibrationActive = false;
+let calibrationIndex = 0;
+let calibrationHoldStarted = 0;
+const calibrationHoldMs = 680;
+const calibrationSteps = [
+  {
+    gesture: "TRACK",
+    title: "Open your hand",
+    text: "Spread all five fingers and hold them naturally inside the camera view."
+  },
+  {
+    gesture: "GRAB",
+    title: "Pinch thumb + index",
+    text: "Touch the thumb tip to the index tip and hold. This becomes the move gesture."
+  },
+  {
+    gesture: "DELETE",
+    title: "Raise only your pinky",
+    text: "Keep index, middle and ring folded. Hold the pinky up. This is single-object select/delete."
+  },
+  {
+    gesture: "DRAW",
+    title: "Raise only your index",
+    text: "Keep the other fingers folded. Hold the index up. This is the drawing gesture."
+  }
+];
 
 let stableGesture = "IDLE";
 let gestureCandidate = "IDLE";
@@ -136,7 +172,8 @@ function midpoint(a, b) {
 }
 
 function dist(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y);
+  const dz = (a.z != null && b.z != null) ? a.z - b.z : 0;
+  return Math.hypot(a.x - b.x, a.y - b.y, dz);
 }
 
 function jointAngle(a, b, c) {
@@ -817,6 +854,160 @@ function emitParticles(point, speed, curvature) {
   while (particles.length > SETTINGS.maxParticles) particles.shift();
 }
 
+
+function projectWorldPoint(point, center) {
+  let x = (point.x - center.x) * 860;
+  let y = (point.y - center.y) * 860;
+  let z = (point.z - center.z) * 860;
+
+  const yaw = -0.58;
+  const pitch = 0.22;
+
+  const x1 = x * Math.cos(yaw) - z * Math.sin(yaw);
+  const z1 = x * Math.sin(yaw) + z * Math.cos(yaw);
+
+  const y2 = y * Math.cos(pitch) - z1 * Math.sin(pitch);
+  const z2 = y * Math.sin(pitch) + z1 * Math.cos(pitch);
+
+  const camera = 760;
+  const depth = Math.max(300, camera + z2);
+  const perspective = camera / depth;
+
+  return {
+    x: calibrationCanvas.width * .5 + x1 * perspective,
+    y: calibrationCanvas.height * .52 + y2 * perspective,
+    depth: perspective,
+  };
+}
+
+function draw3DPreview(hand) {
+  if (!calibrationCtx || !calibrationCanvas) return;
+
+  const w = calibrationCanvas.width;
+  const h = calibrationCanvas.height;
+  calibrationCtx.clearRect(0, 0, w, h);
+
+  calibrationCtx.save();
+  calibrationCtx.fillStyle = "#000";
+  calibrationCtx.fillRect(0, 0, w, h);
+
+  calibrationCtx.strokeStyle = "rgba(41,232,212,.09)";
+  calibrationCtx.lineWidth = 1;
+
+  for (let i = 1; i < 7; i++) {
+    const x = w * i / 7;
+    const y = h * i / 7;
+    calibrationCtx.beginPath();
+    calibrationCtx.moveTo(x, 0);
+    calibrationCtx.lineTo(x, h);
+    calibrationCtx.stroke();
+    calibrationCtx.beginPath();
+    calibrationCtx.moveTo(0, y);
+    calibrationCtx.lineTo(w, y);
+    calibrationCtx.stroke();
+  }
+
+  if (!hand || hand.length !== 21) {
+    calibrationCtx.restore();
+    return;
+  }
+
+  const center = {
+    x: (hand[0].x + hand[9].x + hand[13].x + hand[17].x) / 4,
+    y: (hand[0].y + hand[9].y + hand[13].y + hand[17].y) / 4,
+    z: (hand[0].z + hand[9].z + hand[13].z + hand[17].z) / 4,
+  };
+
+  const projected = hand.map(point => projectWorldPoint(point, center));
+
+  const orderedConnections = [...CONNECTIONS].sort(
+    (a, b) => ((projected[a[0]].depth + projected[a[1]].depth) * .5)
+            - ((projected[b[0]].depth + projected[b[1]].depth) * .5)
+  );
+
+  calibrationCtx.lineCap = "round";
+  calibrationCtx.lineJoin = "round";
+  calibrationCtx.shadowColor = "#29E8D4";
+  calibrationCtx.shadowBlur = 12;
+  calibrationCtx.lineWidth = 2.4;
+  calibrationCtx.strokeStyle = "rgba(41,232,212,.82)";
+
+  for (const [a, b] of orderedConnections) {
+    calibrationCtx.beginPath();
+    calibrationCtx.moveTo(projected[a].x, projected[a].y);
+    calibrationCtx.lineTo(projected[b].x, projected[b].y);
+    calibrationCtx.stroke();
+  }
+
+  calibrationCtx.shadowBlur = 0;
+
+  for (let i = 0; i < projected.length; i++) {
+    const p = projected[i];
+    const size = 3.2 + p.depth * 1.7;
+
+    calibrationCtx.beginPath();
+    calibrationCtx.fillStyle = i === 8
+      ? "#FF4F91"
+      : i === 20
+        ? "#D8FF5A"
+        : "#85FFF3";
+    calibrationCtx.arc(p.x, p.y, Math.max(2.2, size), 0, Math.PI * 2);
+    calibrationCtx.fill();
+  }
+
+  calibrationCtx.restore();
+}
+
+function updateCalibration(now) {
+  if (!calibrationActive) return;
+
+  draw3DPreview(latestWorldHand);
+
+  const step = calibrationSteps[calibrationIndex];
+  if (!step) return;
+
+  calibrationTitle.textContent = step.title;
+  calibrationText.textContent = latestWorldHand
+    ? step.text
+    : "Move your whole hand into the camera view. The 3D preview will appear automatically.";
+  calibrationStep.textContent = (calibrationIndex + 1) + " / " + calibrationSteps.length;
+
+  let confidence = 0;
+
+  if (latestWorldHand) {
+    const result = classifyGesture(latestWorldHand);
+    confidence = result.name === step.gesture ? result.score : 0;
+  }
+
+  if (confidence >= .68) {
+    if (!calibrationHoldStarted) calibrationHoldStarted = now;
+  } else {
+    calibrationHoldStarted = 0;
+  }
+
+  const progress = calibrationHoldStarted
+    ? Math.max(0, Math.min(1, (now - calibrationHoldStarted) / calibrationHoldMs))
+    : 0;
+
+  if (calibrationMeterFill) {
+    calibrationMeterFill.style.width = Math.round(progress * 100) + "%";
+  }
+
+  if (progress >= 1) {
+    calibrationIndex += 1;
+    calibrationHoldStarted = 0;
+
+    if (calibrationIndex >= calibrationSteps.length) {
+      calibrationActive = false;
+      calibrationScreen?.classList.add("hidden");
+      stableGesture = "IDLE";
+      gestureCandidate = "IDLE";
+      gestureCandidateAt = now;
+      resetMotionFilter();
+    }
+  }
+}
+
 function drawEffects(dt) {
   const { width, height } = size();
   fxCtx.clearRect(0, 0, width, height);
@@ -950,6 +1141,8 @@ function handleDelete(now) {
 }
 
 function updateInteraction(now) {
+  if (calibrationActive) return;
+
   let point = null;
 
   if (latestHand) {
@@ -971,7 +1164,7 @@ function updateInteraction(now) {
   }
 
   if (latestHand) {
-    commitGesture(classifyGesture(latestHand), now);
+    commitGesture(classifyGesture(latestWorldHand || latestHand), now);
   } else if (now - lastSampleAt > SETTINGS.lostGraceMs) {
     stableGesture = "IDLE";
     gestureCandidate = "IDLE";
@@ -1026,9 +1219,11 @@ function processVideo(now) {
   try {
     const result = landmarker.detectForVideo(video, now);
     latestHand = result.landmarks?.[0] || null;
+    latestWorldHand = result.worldLandmarks?.[0] || latestHand;
   } catch (error) {
     console.warn("Hand detection failed", error);
     latestHand = null;
+    latestWorldHand = null;
   }
 }
 
@@ -1037,7 +1232,11 @@ function frame(now) {
   lastFrameAt = now;
 
   processVideo(now);
-  updateInteraction(now);
+  if (calibrationActive) {
+    updateCalibration(now);
+  } else {
+    updateInteraction(now);
+  }
   drawEffects(dt);
 
   requestAnimationFrame(frame);
@@ -1094,6 +1293,11 @@ async function start() {
     landmarker = await createLandmarker();
     running = true;
     startScreen.classList.add("hidden");
+
+    calibrationActive = true;
+    calibrationIndex = 0;
+    calibrationHoldStarted = 0;
+    calibrationScreen?.classList.remove("hidden");
     resizeCanvas();
   } catch (error) {
     console.error(error);
