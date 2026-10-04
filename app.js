@@ -9,17 +9,18 @@ const COLORS = {
   hand: "#29E8D4",
   handPoint: "#85FFF3",
   white: "#FFFFFF",
+  delete: "#FF6F91",
 };
 
 const SETTINGS = {
   detectIntervalMs: 26,
   lostGraceMs: 110,
-  gestureHoldMs: 58,
-  pinchStart: 0.48,
-  pinchRelease: 0.63,
-  collisionRadius: 28,
-  hoverExitRadius: 43,
-  deleteHoldMs: 620,
+  gestureHoldMs: 62,
+  pinchStart: 0.47,
+  pinchRelease: 0.62,
+  collisionRadius: 26,
+  hoverExitRadius: 42,
+  deleteHoldMs: 520,
   drawStartMove: 3.0,
   drawMinMove: 1.35,
   resampleStep: 3.0,
@@ -54,6 +55,7 @@ let lastVideoTime = -1;
 let lastDetectAt = 0;
 let latestHand = null;
 let activePoints = [];
+
 let stableGesture = "IDLE";
 let gestureCandidate = "IDLE";
 let gestureCandidateAt = 0;
@@ -73,12 +75,15 @@ let strokeBounds = [];
 let currentStroke = null;
 let drawAnchor = null;
 let hoveredStrokeIndex = -1;
+
 let grabbedStrokeIndex = -1;
 let previousGrabPoint = null;
 let canvasPanning = false;
+
 let deleteTarget = -1;
 let deleteStartedAt = 0;
 let deleteConsumed = false;
+
 let panX = 0;
 let panY = 0;
 
@@ -124,6 +129,10 @@ function displayPoint(x, y) {
     x: width - (x * renderedW - cropX),
     y: y * renderedH - cropY,
   };
+}
+
+function midpoint(a, b) {
+  return { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
 }
 
 function dist(a, b) {
@@ -191,10 +200,19 @@ function updatePinch(ratio) {
 
 function classifyGesture(hand) {
   const f = fingerFlags(hand);
+
+  // Pinch always wins: thumb + index is the exclusive grab/drag gesture.
   if (updatePinch(pinchRatio(hand))) return "GRAB";
+
+  // Index only = draw.
   if (f.index && !f.middle && !f.ring && !f.pinky) return "DRAW";
+
+  // Pinky only = select/delete exactly one hovered object.
+  if (f.pinky && !f.index && !f.middle && !f.ring) return "DELETE";
+
+  // Open palm = tracking only.
   if (f.thumb && f.index && f.middle && f.ring && f.pinky) return "TRACK";
-  if (!f.index && !f.middle && !f.ring && !f.pinky) return "DELETE";
+
   return "IDLE";
 }
 
@@ -212,6 +230,16 @@ function commitGesture(next, now) {
   }
 }
 
+function resetMotionFilter() {
+  rawPoint = null;
+  filteredPoint = null;
+  velocity = { x: 0, y: 0 };
+  lastSampleAt = 0;
+  motionSamples = [];
+  lastCurvature = 0;
+  lastSpeed = 0;
+}
+
 function onGestureChanged(prev, next) {
   if (prev === "DRAW" && next !== "DRAW") stopStroke();
 
@@ -222,28 +250,51 @@ function onGestureChanged(prev, next) {
   }
 
   if (next === "DRAW") {
-    drawAnchor = filteredPoint ? { ...filteredPoint } : null;
     grabbedStrokeIndex = -1;
-    canvasPanning = false;
     previousGrabPoint = null;
+    canvasPanning = false;
     deleteTarget = -1;
+    deleteStartedAt = 0;
     deleteConsumed = false;
+    drawAnchor = filteredPoint ? { ...filteredPoint } : null;
     currentStroke = null;
   }
 
   if (next === "GRAB") {
-    grabbedStrokeIndex = hoveredStrokeIndex;
+    const pinchPoint = latestHand
+      ? displayPoint(
+          (latestHand[4].x + latestHand[8].x) * .5,
+          (latestHand[4].y + latestHand[8].y) * .5
+        )
+      : filteredPoint;
+
+    const grabPoints = latestHand
+      ? [pinchPoint, activePoints[4], activePoints[8]].filter(Boolean)
+      : [];
+
+    grabbedStrokeIndex = findHoveredStroke(grabPoints, SETTINGS.collisionRadius * 1.55);
     canvasPanning = grabbedStrokeIndex < 0;
-    previousGrabPoint = filteredPoint ? { ...filteredPoint } : null;
+    previousGrabPoint = pinchPoint ? { ...pinchPoint } : null;
+
+    deleteTarget = -1;
+    deleteStartedAt = 0;
+    deleteConsumed = false;
+    resetMotionFilter();
+    if (pinchPoint) filteredPoint = { ...pinchPoint };
   }
 
   if (next === "DELETE") {
     stopStroke();
     grabbedStrokeIndex = -1;
+    previousGrabPoint = null;
     canvasPanning = false;
-    deleteTarget = findHoveredStroke(activePoints, SETTINGS.collisionRadius * 1.15);
+
+    // Only one target can ever be selected. Nothing is deleted when the
+    // pinky is away from an existing stroke.
+    deleteTarget = findHoveredStroke(activePoints, SETTINGS.collisionRadius * 1.2);
     deleteStartedAt = deleteTarget >= 0 ? performance.now() : 0;
     deleteConsumed = false;
+    resetMotionFilter();
   }
 
   if (next !== "DELETE") {
@@ -290,6 +341,9 @@ function estimateKinematics(point, now) {
 
   rawPoint = { ...point };
   lastSampleAt = now;
+  lastSpeed = speed;
+  lastCurvature = curvature;
+
   return { speed, curvature };
 }
 
@@ -301,21 +355,17 @@ function naturalFilter(point, now, mode) {
     return { ...point };
   }
 
+  const beforeSample = { ...filteredPoint };
   const dt = Math.max(.008, Math.min(.06, (now - lastSampleAt) / 1000 || .016));
   const motion = estimateKinematics(point, now);
   const speedN = Math.min(1, motion.speed / 1150);
 
-  // Adaptive one-euro-like response: human micro-tremor gets damped,
-  // but intentional fast motion stays close to the measured fingertip.
   let alpha = .16 + .70 * Math.pow(speedN, .58);
   if (mode === "GRAB") alpha += .16;
 
-  // Natural drawing often slows in tighter curves. Use curvature only
-  // as a gentle brake, never as a hard geometric constraint.
   const curvatureBrake = 1 / (1 + 3.8 * Math.min(1, motion.curvature * 18));
   alpha *= .76 + .24 * curvatureBrake;
-
-  alpha = Math.max(mode === "GRAB" ? .68 : .12, Math.min(mode === "GRAB" ? .98 : .86, alpha));
+  alpha = Math.max(mode === "GRAB" ? .70 : .12, Math.min(mode === "GRAB" ? .98 : .86, alpha));
 
   const next = {
     x: filteredPoint.x + (point.x - filteredPoint.x) * alpha,
@@ -323,8 +373,8 @@ function naturalFilter(point, now, mode) {
   };
 
   velocity = {
-    x: (next.x - filteredPoint.x) / dt,
-    y: (next.y - filteredPoint.y) / dt,
+    x: (next.x - beforeSample.x) / dt,
+    y: (next.y - beforeSample.y) / dt,
   };
 
   filteredPoint = next;
@@ -372,12 +422,14 @@ function addStrokePoint(point) {
   if (d < SETTINGS.drawMinMove) return false;
 
   const steps = Math.max(1, Math.ceil(d / SETTINGS.resampleStep));
+
   for (let i = 1; i <= steps; i++) {
     const t = i / steps;
     const p = {
       x: last.x + (point.x - last.x) * t,
       y: last.y + (point.y - last.y) * t,
     };
+
     currentStroke.push(p);
     updateStrokeBounds(strokes.length - 1, p);
   }
@@ -401,12 +453,21 @@ function distanceToSegment(p, a, b) {
   const abx = b.x - a.x;
   const aby = b.y - a.y;
   const denom = abx * abx + aby * aby;
+
   if (!denom) return dist(p, a);
-  const t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / denom));
-  return Math.hypot(p.x - (a.x + abx * t), p.y - (a.y + aby * t));
+
+  const t = Math.max(
+    0,
+    Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / denom)
+  );
+
+  return Math.hypot(
+    p.x - (a.x + abx * t),
+    p.y - (a.y + aby * t)
+  );
 }
 
-function findHoveredStroke(points, radius) {
+function findHoveredStroke(points, radius = SETTINGS.collisionRadius) {
   if (!points.length || !strokes.length) return -1;
 
   let best = -1;
@@ -425,7 +486,12 @@ function findHoveredStroke(points, radius) {
       if (p.x < minX || p.x > maxX || p.y < minY || p.y > maxY) continue;
 
       for (let j = 1; j < strokes[i].length; j++) {
-        const d = distanceToSegment(p, strokePoint(i, j - 1), strokePoint(i, j));
+        const d = distanceToSegment(
+          p,
+          strokePoint(i, j - 1),
+          strokePoint(i, j)
+        );
+
         if (d < bestDistance) {
           bestDistance = d;
           best = i;
@@ -439,9 +505,12 @@ function findHoveredStroke(points, radius) {
 
 function deleteStroke(index) {
   if (index < 0 || index >= strokes.length) return;
+
+  // Delete one and only one indexed stroke. No global clear occurs here.
   strokes.splice(index, 1);
   strokeOffsets.splice(index, 1);
   strokeBounds.splice(index, 1);
+
   hoveredStrokeIndex = -1;
   deleteTarget = -1;
   redraw();
@@ -451,6 +520,7 @@ function drawStroke(ctx, stroke, index, highlight) {
   if (!stroke.length) return;
 
   const offset = strokeOffsets[index] || { x: 0, y: 0 };
+
   ctx.save();
   ctx.translate(offset.x + panX, offset.y + panY);
   ctx.lineCap = "round";
@@ -461,7 +531,13 @@ function drawStroke(ctx, stroke, index, highlight) {
     ctx.fillStyle = highlight ? COLORS.hover : COLORS.draw;
     ctx.shadowColor = ctx.fillStyle;
     ctx.shadowBlur = highlight ? 18 : 12;
-    ctx.arc(stroke[0].x, stroke[0].y, SETTINGS.brushWidth * .55, 0, Math.PI * 2);
+    ctx.arc(
+      stroke[0].x,
+      stroke[0].y,
+      SETTINGS.brushWidth * .55,
+      0,
+      Math.PI * 2
+    );
     ctx.fill();
     ctx.restore();
     return;
@@ -480,6 +556,7 @@ function drawStroke(ctx, stroke, index, highlight) {
       x: p1.x + (p2.x - p0.x) / 6,
       y: p1.y + (p2.y - p0.y) / 6,
     };
+
     const c2 = {
       x: p2.x - (p3.x - p1.x) / 6,
       y: p2.y - (p3.y - p1.y) / 6,
@@ -488,7 +565,10 @@ function drawStroke(ctx, stroke, index, highlight) {
     ctx.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, p2.x, p2.y);
   }
 
-  ctx.lineWidth = highlight ? SETTINGS.brushWidth + 1.15 : SETTINGS.brushWidth;
+  ctx.lineWidth = highlight
+    ? SETTINGS.brushWidth + 1.15
+    : SETTINGS.brushWidth;
+
   ctx.strokeStyle = highlight ? COLORS.hover : COLORS.draw;
   ctx.shadowColor = ctx.strokeStyle;
 
@@ -512,7 +592,7 @@ function redraw() {
   drawCtx.clearRect(0, 0, width, height);
 
   for (let i = 0; i < strokes.length; i++) {
-    drawStroke(drawCtx, strokes[i], i, i === hoveredStrokeIndex);
+    drawStroke(drawCtx, strokes[i], i, i === hoveredStrokeIndex || i === deleteTarget);
   }
 }
 
@@ -544,9 +624,45 @@ function drawHand(points) {
   fxCtx.restore();
 }
 
+function drawDeletePreview() {
+  if (stableGesture !== "DELETE" || deleteTarget < 0 || !deleteStartedAt || deleteConsumed) return;
+
+  const b = strokeBounds[deleteTarget];
+  if (!b) return;
+
+  const progress = Math.max(
+    0,
+    Math.min(1, (performance.now() - deleteStartedAt) / SETTINGS.deleteHoldMs)
+  );
+
+  const offset = strokeOffsets[deleteTarget] || { x: 0, y: 0 };
+  const cx = (b.minX + b.maxX) / 2 + offset.x + panX;
+  const cy = (b.minY + b.maxY) / 2 + offset.y + panY;
+  const radius = Math.max(28, Math.hypot(b.maxX - b.minX, b.maxY - b.minY) * .18);
+
+  fxCtx.save();
+  fxCtx.strokeStyle = COLORS.delete;
+  fxCtx.shadowColor = COLORS.delete;
+  fxCtx.shadowBlur = 14;
+  fxCtx.lineWidth = 2.2;
+  fxCtx.beginPath();
+  fxCtx.arc(
+    cx,
+    cy,
+    radius + 9,
+    -Math.PI / 2,
+    -Math.PI / 2 + progress * Math.PI * 2
+  );
+  fxCtx.stroke();
+  fxCtx.restore();
+}
+
 function emitParticles(point, speed, curvature) {
   const turnBrake = 1 / (1 + curvature * 20);
-  const count = Math.min(5, Math.max(1, Math.round(1 + speed / 620) * (turnBrake > .55 ? 1 : .55)));
+  const count = Math.min(
+    5,
+    Math.max(1, Math.round(1 + speed / 620) * (turnBrake > .55 ? 1 : .55))
+  );
 
   for (let i = 0; i < count; i++) {
     const a = Math.random() * Math.PI * 2;
@@ -621,27 +737,7 @@ function drawEffects(dt) {
   }
 
   if (activePoints.length === 21) drawHand(activePoints);
-
-  if (stableGesture === "DELETE" && deleteTarget >= 0 && deleteStartedAt && !deleteConsumed) {
-    const progress = Math.max(0, Math.min(1, (performance.now() - deleteStartedAt) / SETTINGS.deleteHoldMs));
-    const b = strokeBounds[deleteTarget];
-
-    if (b) {
-      const cx = (b.minX + b.maxX) / 2 + (strokeOffsets[deleteTarget]?.x || 0) + panX;
-      const cy = (b.minY + b.maxY) / 2 + (strokeOffsets[deleteTarget]?.y || 0) + panY;
-      const radius = Math.max(26, Math.hypot(b.maxX - b.minX, b.maxY - b.minY) * .18);
-
-      fxCtx.save();
-      fxCtx.strokeStyle = "rgba(255,105,135,.72)";
-      fxCtx.shadowColor = "rgba(255,80,120,.9)";
-      fxCtx.shadowBlur = 12;
-      fxCtx.lineWidth = 2;
-      fxCtx.beginPath();
-      fxCtx.arc(cx, cy, radius + 8, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
-      fxCtx.stroke();
-      fxCtx.restore();
-    }
-  }
+  drawDeletePreview();
 }
 
 function handleDrawing(point) {
@@ -657,12 +753,17 @@ function handleDrawing(point) {
       flashes.push({ x: point.x, y: point.y, life: 0, maxLife: .16 });
       redraw();
     }
+
     return;
   }
 
   if (addStrokePoint(point)) {
     emitParticles(point, lastSpeed, lastCurvature);
-    if (Math.random() < .36) flashes.push({ x: point.x, y: point.y, life: 0, maxLife: .17 });
+
+    if (Math.random() < .36) {
+      flashes.push({ x: point.x, y: point.y, life: 0, maxLife: .17 });
+    }
+
     redraw();
   }
 }
@@ -678,7 +779,7 @@ function handleGrab(point) {
   const dx = point.x - previousGrabPoint.x;
   const dy = point.y - previousGrabPoint.y;
 
-  if (Math.hypot(dx, dy) >= 1.1) {
+  if (Math.hypot(dx, dy) >= 1.0) {
     if (grabbedStrokeIndex >= 0) {
       strokeOffsets[grabbedStrokeIndex].x += dx;
       strokeOffsets[grabbedStrokeIndex].y += dy;
@@ -695,11 +796,12 @@ function handleGrab(point) {
 function handleDelete(now) {
   if (deleteTarget < 0) return;
 
-  const stillOver = findHoveredStroke(activePoints, SETTINGS.collisionRadius * 1.2);
+  const stillOver = findHoveredStroke(activePoints, SETTINGS.collisionRadius * 1.22);
 
   if (stillOver !== deleteTarget) {
     deleteTarget = stillOver;
     deleteStartedAt = stillOver >= 0 ? now : 0;
+    deleteConsumed = false;
     return;
   }
 
@@ -710,14 +812,21 @@ function handleDelete(now) {
 }
 
 function updateInteraction(now) {
+  let point = null;
+
   if (latestHand) {
     activePoints = latestHand.map(p => displayPoint(p.x, p.y));
 
-    const tip = latestHand[8];
-    const point = naturalFilter(displayPoint(tip.x, tip.y), now, stableGesture === "GRAB" ? "GRAB" : "DRAW");
+    const indexPoint = activePoints[8];
+    const pinchPoint = midpoint(activePoints[4], activePoints[8]);
 
-    if (stableGesture === "DRAW") handleDrawing(point);
-    else if (stableGesture === "GRAB") handleGrab(point);
+    if (stableGesture === "GRAB") {
+      point = naturalFilter(pinchPoint, now, "GRAB");
+      handleGrab(point);
+    } else if (stableGesture === "DRAW") {
+      point = naturalFilter(indexPoint, now, "DRAW");
+      handleDrawing(point);
+    }
   } else {
     activePoints = [];
     predictPoint(now);
@@ -728,25 +837,42 @@ function updateInteraction(now) {
   } else if (now - lastSampleAt > SETTINGS.lostGraceMs) {
     stableGesture = "IDLE";
     gestureCandidate = "IDLE";
+    grabbedStrokeIndex = -1;
+    previousGrabPoint = null;
+    deleteTarget = -1;
   }
 
-  const radius = hoveredStrokeIndex >= 0 ? SETTINGS.hoverExitRadius : SETTINGS.collisionRadius;
-  hoveredStrokeIndex = findHoveredStroke(activePoints, radius);
+  const hoverPoints = stableGesture === "GRAB"
+    ? [activePoints[4], activePoints[8], midpoint(activePoints[4], activePoints[8])].filter(Boolean)
+    : activePoints;
 
-  if (stableGesture === "DELETE") handleDelete(now);
+  const radius = hoveredStrokeIndex >= 0
+    ? SETTINGS.hoverExitRadius
+    : SETTINGS.collisionRadius;
+
+  hoveredStrokeIndex = findHoveredStroke(hoverPoints, radius);
+
+  if (stableGesture === "DELETE") {
+    // Pinky mode locks to one hovered stroke. Never call clearAll here.
+    if (deleteTarget < 0 && hoveredStrokeIndex >= 0) {
+      deleteTarget = hoveredStrokeIndex;
+      deleteStartedAt = now;
+    }
+    handleDelete(now);
+  }
 
   const labels = {
     IDLE: "READY",
     TRACK: "TRACKING",
     DRAW: "DRAWING",
-    GRAB: grabbedStrokeIndex >= 0 ? "GRAB · OBJECT" : "GRAB · CANVAS",
-    DELETE: "DELETE TARGET",
+    GRAB: grabbedStrokeIndex >= 0 ? "PINCH · MOVE OBJECT" : "PINCH · MOVE CANVAS",
+    DELETE: deleteTarget >= 0 ? "PINKY · SELECT / DELETE" : "PINKY · TARGET A STROKE",
   };
 
   status.textContent = running ? labels[stableGesture] : "CAMERA OFF";
   motionLabel.textContent = running
-    ? "MOTION MODEL · speed " + Math.round(lastSpeed) + " · curvature " + lastCurvature.toFixed(2)
-    : "MOTION MODEL · READY";
+    ? "HAND MOTION · speed " + Math.round(lastSpeed) + " · curvature " + lastCurvature.toFixed(2)
+    : "HAND MOTION · READY";
 }
 
 function processVideo(now) {
@@ -768,9 +894,11 @@ function processVideo(now) {
 function frame(now) {
   const dt = Math.min(.05, Math.max(.001, (now - lastFrameAt) / 1000));
   lastFrameAt = now;
+
   processVideo(now);
   updateInteraction(now);
   drawEffects(dt);
+
   requestAnimationFrame(frame);
 }
 
@@ -788,6 +916,7 @@ async function createLandmarker() {
     });
   } catch (gpuError) {
     console.warn("GPU delegate unavailable; using CPU.", gpuError);
+
     return HandLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: MODEL_URL, delegate: "CPU" },
       runningMode: "VIDEO",
@@ -854,6 +983,7 @@ function savePng() {
   const { width, height } = size();
   const out = document.createElement("canvas");
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
   out.width = Math.round(width * dpr);
   out.height = Math.round(height * dpr);
 
