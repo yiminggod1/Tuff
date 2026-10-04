@@ -1771,12 +1771,26 @@ function classifyGestureBeforeCalibration(hand) {
     f.pinky.curled
   ) * (1 - pinch * .95);
 
-  const deleteScore = Math.min(
-    f.pinky.extended,
-    f.index.curled,
-    f.middle.curled,
-    f.ring.curled
-  ) * (1 - pinch * .95);
+  const deleteQualified =
+    f.pinky.extended >= .64 &&
+    f.pinky.extended - Math.max(
+      f.index.extended,
+      f.middle.extended,
+      f.ring.extended
+    ) >= .12 &&
+    f.index.curled >= .52 &&
+    f.middle.curled >= .52 &&
+    f.ring.curled >= .52 &&
+    f.thumb <= .62;
+
+  const deleteScore = deleteQualified
+    ? Math.min(
+        f.pinky.extended,
+        f.index.curled,
+        f.middle.curled,
+        f.ring.curled
+      ) * (1 - pinch * .95)
+    : 0;
 
   const trackScore = Math.min(
     f.thumb,
