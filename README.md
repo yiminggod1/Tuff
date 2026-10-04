@@ -33,6 +33,7 @@ The calibration is intentionally more than a gesture-name test. Tuff builds a pe
 - finger extension/curl baselines
 - thumb-index pinch ratio
 - short-term motion stability
+- filtered fingertip motion speed
 - hand framing and depth structure
 
 The learned 3D template is then blended with the anatomical gesture detector. This lets the app be stricter about **who is being tracked** and less dependent on one fixed set of hand-angle thresholds.
@@ -65,3 +66,17 @@ Captured samples are resampled for stable spacing and rendered as continuous Bé
 ## Deployment
 
 The pages workflow deploys the site to GitHub Pages on pushes to main.
+
+
+## Anti-false-trigger pipeline
+
+Gesture transitions use several independent gates:
+
+1. **1€ landmark filtering** smooths the 21 image/world landmark streams before geometry is evaluated.
+2. **300 ms temporal voting** requires at least 5 observations and an 80% qualifying majority before entering a gesture.
+3. **Buffered release** prevents a single noisy frame from dropping an active gesture.
+4. **Draw speed gate** blocks a new DRAW activation while the index fingertip is moving too fast; once drawing is already engaged, normal intentional motion is allowed.
+5. **Pinch geometry** combines 3D tip distance, thumb/index joint bending, and palm-normal orientation.
+6. **Pinky geometry** requires the pinky to dominate while index/middle/ring are curled and the thumb is not in an open-palm state.
+
+These gates are deliberately redundant: a frame must survive filtering, temporal consistency, anatomy, and motion checks before it can trigger an action.
