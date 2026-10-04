@@ -105,7 +105,7 @@ class OneEuroFilter {
   }
 
   filter(value, nowMs) {
-    if (this.prevRaw == null || !this.prevFiltered) {
+    if (this.prevRaw == null || this.prevFiltered == null) {
       this.prevRaw = value;
       this.prevFiltered = value;
       this.prevTime = nowMs;
@@ -588,8 +588,12 @@ function onStart(next) {
     deleteTarget = -1;
     deleteStartedAt = 0;
     deleteConsumed = false;
-    drawAnchor = filteredPoint ? { ...filteredPoint } : null;
     currentStroke = null;
+
+    const indexPoint = activePoints[8];
+    resetMotionFilter();
+    filteredPoint = indexPoint ? { ...indexPoint } : null;
+    drawAnchor = indexPoint ? { ...indexPoint } : null;
   }
 
   if (next === "GRAB") {
@@ -1332,10 +1336,11 @@ function updateInteraction(now) {
   }
 
   if (latestHand) {
-    updateGestureState(
-      classifyGesture(latestWorldHand || latestHand, indexWorldSpeed),
-      now
-    );
+    const gestureResult = latestWorldHand
+      ? classifyGesture(latestWorldHand, indexWorldSpeed)
+      : { name: "IDLE", score: 0, margin: 0, sideOn: true };
+
+    updateGestureState(gestureResult, now);
   } else if (now - lastSampleAt > SETTINGS.lostGraceMs) {
     const ended = currentState;
     currentState = "IDLE";
