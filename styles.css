@@ -47,6 +47,87 @@ canvas {
 #drawingCanvas { z-index: 2; }
 #effectsCanvas { z-index: 3; pointer-events: none; }
 
+.calibration-screen {
+  position: absolute;
+  z-index: 11;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 50% 40%, rgba(41,232,212,.10), transparent 38%),
+    #000;
+  transition: opacity .3s ease, transform .3s ease;
+}
+
+.calibration-screen.hidden {
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(1.02);
+}
+
+.calibration-card {
+  width: min(760px, calc(100% - 28px));
+  padding: 18px;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 24px;
+  background: rgba(0,0,0,.58);
+  box-shadow: 0 24px 80px rgba(0,0,0,.42);
+  backdrop-filter: blur(18px);
+  text-align: center;
+}
+
+.calibration-card canvas {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: auto;
+  max-height: 48vh;
+  object-fit: contain;
+  display: block;
+  margin: 2px auto 8px;
+  background: radial-gradient(circle at 50% 50%, rgba(41,232,212,.04), transparent 62%);
+}
+
+.calibration-card h2 {
+  margin: 2px 0 4px;
+  font-size: clamp(22px, 3vw, 34px);
+  letter-spacing: -.02em;
+}
+
+.calibration-card p {
+  margin: 0 auto 12px;
+  max-width: 620px;
+  color: rgba(238,254,250,.62);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.calibration-meter {
+  height: 4px;
+  width: min(520px, 88%);
+  margin: 0 auto 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,.08);
+  overflow: hidden;
+}
+
+.calibration-meter span {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: #29e8d4;
+  box-shadow: 0 0 16px rgba(41,232,212,.5);
+  transition: width .08s linear;
+}
+
+.calibration-step {
+  color: rgba(133,255,243,.72);
+  font-size: 10px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+}
+
 .start-screen {
   position: absolute;
   z-index: 10;
