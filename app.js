@@ -15,14 +15,34 @@ const COLORS = {
 const SETTINGS = {
   detectIntervalMs: 26,
   lostGraceMs: 110,
-  gestureWindowMs: 300,
-  gestureWindowRatio: .80,
-  gestureWindowMinSamples: 5,
-  gestureReleaseMs: 170,
-  gestureReleaseRatio: .62,
-  drawMaxStartSpeed: 460,
-  pinchStart: 0.47,
-  pinchRelease: 0.62,
+
+  // === 15-frame hysteresis state machine ===
+  gestureWindowSize: 15,
+  gestureEnterRatio: .85,
+  gestureMaintainRatio: .30,
+  gestureMinFrames: 15,
+  sideOnEnterRatio: .92,
+
+  // === World Landmark 1€ filter ===
+  // minCutoff 越低越穩、延遲越高；beta 越高高速時越靈敏。
+  worldFilterMinCutoff: .30,
+  worldFilterBeta: .007,
+  worldFilterDerivativeCutoff: 1.0,
+
+  // Image landmarks only drive the visible cursor/skeleton.
+  imageFilterMinCutoff: 1.10,
+  imageFilterBeta: .025,
+  imageFilterDerivativeCutoff: 1.0,
+
+  // === Dynamic scale-invariant geometry ===
+  pinchMaxPalmRatio: .25,
+  pinchSideOnPalmRatio: .18,
+  pinchReleasePalmRatio: .34,
+  pinchMinOrientation: .28,
+
+  // Normalized by PalmScale per second. Only blocks DRAW entry.
+  drawMaxStartPalmSpeeds: 3.2,
+
   collisionRadius: 26,
   hoverExitRadius: 42,
   deleteHoldMs: 520,
@@ -110,16 +130,25 @@ class OneEuroFilter {
   }
 }
 
-function createLandmarkFilterBank() {
+function createLandmarkFilterBank(minCutoff, beta, derivativeCutoff) {
   return Array.from({ length: 21 }, () => ({
-    x: new OneEuroFilter(1.25, .025, 1.0),
-    y: new OneEuroFilter(1.25, .025, 1.0),
-    z: new OneEuroFilter(1.10, .030, 1.0),
+    x: new OneEuroFilter(minCutoff, beta, derivativeCutoff),
+    y: new OneEuroFilter(minCutoff, beta, derivativeCutoff),
+    z: new OneEuroFilter(minCutoff, beta, derivativeCutoff),
   }));
 }
 
-const imageLandmarkFilters = createLandmarkFilterBank();
-const worldLandmarkFilters = createLandmarkFilterBank();
+const imageLandmarkFilters = createLandmarkFilterBank(
+  SETTINGS.imageFilterMinCutoff,
+  SETTINGS.imageFilterBeta,
+  SETTINGS.imageFilterDerivativeCutoff
+);
+
+const worldLandmarkFilters = createLandmarkFilterBank(
+  SETTINGS.worldFilterMinCutoff,
+  SETTINGS.worldFilterBeta,
+  SETTINGS.worldFilterDerivativeCutoff
+);
 
 function resetLandmarkFilters() {
   for (const bank of [imageLandmarkFilters, worldLandmarkFilters]) {
