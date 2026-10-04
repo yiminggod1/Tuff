@@ -4,6 +4,8 @@ Browser-based hand-tracking canvas built around natural human drawing kinematics
 
 ## Gesture controls
 
+Before drawing begins, Tuff runs a short 3D hand calibration. The camera stays active while a real-time perspective skeleton is rendered from MediaPipe world landmarks. You must hold four poses in sequence: open palm, thumb + index pinch, pinky only, then index only.
+
 - Index finger only → draw a persistent neon stroke
 - Thumb + index pinch → grab and move the selected object; pinch on empty space pans the canvas
 - Pinky only → select the hovered stroke and hold briefly to delete that single stroke
@@ -16,7 +18,7 @@ Pinky deletion is intentionally target-scoped: it can remove one hovered stroke 
 
 The pointer is not treated as a raw mouse cursor. It uses adaptive filtering driven by estimated fingertip speed and local path curvature. Slow micro-movements are attenuated while intentional fast movement receives a faster response. Tight turns receive slightly more damping, reflecting the documented speed–curvature relationship in human drawing movements.
 
-Captured samples are resampled for stable spacing and rendered as continuous Bézier segments. Particle emission follows movement speed and is reduced around tighter turns.
+Captured samples are resampled for stable spacing and rendered as continuous Bézier segments. Gesture classification uses 3D world-landmark geometry when available, while the on-screen cursor uses mirrored image coordinates. Particle emission follows movement speed and is reduced around tighter turns.
 
 ## Stack
 
