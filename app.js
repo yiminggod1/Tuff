@@ -172,7 +172,6 @@ function smoothLandmarks(points, nowMs, filterBank) {
 }
 
 let currentState = "IDLE";
-let pinchActive = false;
 
 let rawPoint = null;
 let filteredPoint = null;
@@ -730,9 +729,6 @@ function updateGestureState(result, now) {
   }
 }
 
-let indexSpeed = 0;
-let indexSpeedPoint = null;
-let indexSpeedAt = 0;
 let indexWorldSpeed = 0;
 let indexWorldPoint = null;
 let indexWorldAt = 0;
@@ -745,39 +741,9 @@ function resetMotionFilter() {
   motionSamples = [];
   lastCurvature = 0;
   lastSpeed = 0;
-  indexSpeed = 0;
-  indexSpeedPoint = null;
-  indexSpeedAt = 0;
   indexWorldSpeed = 0;
   indexWorldPoint = null;
   indexWorldAt = 0;
-}
-
-function updateIndexSpeed(point, now) {
-  if (!point) {
-    indexSpeed = 0;
-    indexSpeedPoint = null;
-    indexSpeedAt = 0;
-    return 0;
-  }
-
-  if (!indexSpeedPoint) {
-    indexSpeedPoint = { ...point };
-    indexSpeedAt = now;
-    indexSpeed = 0;
-    return 0;
-  }
-
-  const dt = Math.max(.01, Math.min(.12, (now - indexSpeedAt) / 1000));
-  const raw = Math.hypot(
-    point.x - indexSpeedPoint.x,
-    point.y - indexSpeedPoint.y
-  ) / dt;
-
-  indexSpeed = indexSpeed * .72 + raw * .28;
-  indexSpeedPoint = { ...point };
-  indexSpeedAt = now;
-  return indexSpeed;
 }
 
 function updateIndexWorldSpeed(hand, now) {
