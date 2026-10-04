@@ -14,6 +14,17 @@
     <canvas id="drawingCanvas"></canvas>
     <canvas id="effectsCanvas"></canvas>
 
+    <section id="calibrationScreen" class="calibration-screen" aria-label="3D hand calibration">
+      <div class="calibration-card">
+        <div class="eyebrow">TUFF / 3D HAND CALIBRATION</div>
+        <canvas id="calibrationCanvas" width="640" height="420" aria-label="3D hand preview"></canvas>
+        <h2 id="calibrationTitle">Show your hand</h2>
+        <p id="calibrationText">Keep your whole hand visible. We will check four gestures before drawing starts.</p>
+        <div class="calibration-meter"><span id="calibrationMeterFill"></span></div>
+        <div id="calibrationStep" class="calibration-step">1 / 4</div>
+      </div>
+    </section>
+
     <section id="startScreen" class="start-screen" aria-label="Start Gesture Canvas">
       <div class="logo-mark" aria-hidden="true"><span></span></div>
       <div class="eyebrow">TUFF / GESTURE CANVAS</div>
