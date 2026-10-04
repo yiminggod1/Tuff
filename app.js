@@ -971,9 +971,12 @@ function updateInteraction(now) {
     deleteTarget = -1;
   }
 
-  const hoverPoints = stableGesture === "GRAB"
-    ? [activePoints[4], activePoints[8], midpoint(activePoints[4], activePoints[8])].filter(Boolean)
-    : activePoints;
+  const hoverPoints =
+    stableGesture === "GRAB"
+      ? [activePoints[4], activePoints[8], midpoint(activePoints[4], activePoints[8])].filter(Boolean)
+      : stableGesture === "DELETE"
+        ? [activePoints[20]].filter(Boolean)
+        : activePoints;
 
   const radius = hoveredStrokeIndex >= 0
     ? SETTINGS.hoverExitRadius
