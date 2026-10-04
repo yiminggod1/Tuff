@@ -1194,8 +1194,6 @@ function handleDelete(now) {
 }
 
 function updateInteraction(now) {
-  if (calibrationActive) return;
-
   let point = null;
 
   if (latestHand) {
