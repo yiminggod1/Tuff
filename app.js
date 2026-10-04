@@ -230,47 +230,99 @@ function classifyGesture(hand) {
   const f = fingerFlags(hand);
   const pinch = pinchConfidence(hand);
 
-  const drawScore =
-    f.index.extended *
-    f.middle.curled *
-    f.ring.curled *
-    f.pinky.curled *
-    (1 - pinch * .9);
+  // Hard anatomical separation prevents accidental overlap:
+  // draw = index is clearly the dominant extended finger;
+  // delete = pinky is clearly the dominant extended finger;
+  // grab = thumb/index tips are actually pinching.
+  const otherExtendedForIndex = Math.max(
+    f.middle.extended,
+    f.ring.extended,
+    f.pinky.extended
+  );
 
-  const deleteScore =
-    f.pinky.extended *
-    f.index.curled *
-    f.middle.curled *
-    f.ring.curled *
-    (1 - pinch * .9);
+  const otherExtendedForPinky = Math.max(
+    f.index.extended,
+    f.middle.extended,
+    f.ring.extended
+  );
 
-  const trackScore =
-    Math.min(
-      f.thumb,
-      f.index.extended,
-      f.middle.extended,
-      f.ring.extended,
-      f.pinky.extended
-    ) *
-    (1 - pinch);
+  const drawScore = Math.min(
+    f.index.extended,
+    f.middle.curled,
+    f.ring.curled,
+    f.pinky.curled
+  ) * (
+    1 - pinch * .95
+  );
 
-  const grabScore = pinch;
+  const deleteScore = Math.min(
+    f.pinky.extended,
+    f.index.curled,
+    f.middle.curled,
+    f.ring.curled
+  ) * (
+    1 - pinch * .95
+  );
+
+  const trackScore = Math.min(
+    f.thumb,
+    f.index.extended,
+    f.middle.extended,
+    f.ring.extended,
+    f.pinky.extended
+  ) * (1 - pinch);
+
+  const drawQualified =
+    f.index.extended >= .62 &&
+    f.index.extended - otherExtendedForIndex >= .10 &&
+    f.middle.curled >= .46 &&
+    f.ring.curled >= .46 &&
+    f.pinky.curled >= .46;
+
+  const deleteQualified =
+    f.pinky.extended >= .62 &&
+    f.pinky.extended - otherExtendedForPinky >= .10 &&
+    f.index.curled >= .46 &&
+    f.middle.curled >= .46 &&
+    f.ring.curled >= .46;
 
   const ranked = [
-    { name: "GRAB", score: grabScore },
-    { name: "DRAW", score: drawScore },
-    { name: "DELETE", score: deleteScore },
+    { name: "GRAB", score: pinch },
+    { name: "DRAW", score: drawQualified ? Math.max(drawScore, .64) : drawScore },
+    { name: "DELETE", score: deleteQualified ? Math.max(deleteScore, .64) : deleteScore },
     { name: "TRACK", score: trackScore },
   ].sort((a, b) => b.score - a.score);
 
   const best = ranked[0];
   const second = ranked[1];
 
-  if (best.score < .58) {
+  if (best.name === "GRAB" && best.score >= .62) {
+    return {
+      name: "GRAB",
+      score: best.score,
+      margin: best.score - second.score,
+    };
+  }
+
+  if (best.score < .56) {
     return { name: "IDLE", score: best.score, margin: best.score };
   }
 
-  if (best.score - second.score < .11) {
+  // Ambiguous frames do not switch gesture modes. The current stable mode
+  // is allowed to persist until the anatomy becomes clearly different.
+  if (best.score - second.score < .13) {
+    return {
+      name: "IDLE",
+      score: best.score,
+      margin: best.score - second.score,
+    };
+  }
+
+  if (best.name === "DRAW" && !drawQualified) {
+    return { name: "IDLE", score: best.score, margin: best.score - second.score };
+  }
+
+  if (best.name === "DELETE" && !deleteQualified) {
     return { name: "IDLE", score: best.score, margin: best.score - second.score };
   }
 
