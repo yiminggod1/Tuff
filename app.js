@@ -557,7 +557,6 @@ function classifyGesture(hand, motionSpeed = indexWorldSpeed) {
   return { name: best.name, ...base };
 }
 let gestureWindow = [];
-let currentState = "IDLE";
 
 function windowRatio(target) {
   if (gestureWindow.length < SETTINGS.gestureMinFrames) return 0;
