@@ -450,12 +450,60 @@ function learnCalibrationProfile(gesture) {
   };
 }
 
+function personalFeatureSimilarity(hand, profile) {
+  if (!profile) return 0;
+
+  const f = fingerFlags(hand);
+  const values = {
+    thumb: f.thumb,
+    index: f.index.extended,
+    middle: f.middle.extended,
+    ring: f.ring.extended,
+    pinky: f.pinky.extended,
+  };
+
+  const curled = {
+    index: f.index.curled,
+    middle: f.middle.curled,
+    ring: f.ring.curled,
+    pinky: f.pinky.curled,
+  };
+
+  let error = 0;
+  let count = 0;
+
+  for (const finger of Object.keys(profile.extended)) {
+    const delta = values[finger] - profile.extended[finger];
+    error += Math.min(1, Math.abs(delta) / .28);
+    count++;
+  }
+
+  for (const finger of Object.keys(profile.curled)) {
+    const delta = curled[finger] - profile.curled[finger];
+    error += Math.min(1, Math.abs(delta) / .28);
+    count++;
+  }
+
+  error += Math.min(
+    1,
+    Math.abs(pinchRatio(hand) - profile.pinchRatio) / .18
+  );
+
+  return clamp01(1 - error / (count + 1));
+}
+
 function personalizedScore(hand, gesture, genericScore) {
   const profile = calibrationProfile[gesture];
   if (!profile) return genericScore;
 
   const shape = poseSimilarity(hand, profile.template);
-  return clamp01(genericScore * .52 + shape * .48);
+  const features = personalFeatureSimilarity(hand, profile);
+
+  return clamp01(
+    genericScore * .42 +
+    shape * .38 +
+    features * .20
+  );
 }
 
 
@@ -609,11 +657,22 @@ function classifyGesture(hand) {
     return { name: "IDLE", score: best.score, margin: best.score - second.score };
   }
 
-  if (best.name === "DRAW" && !drawQualified) {
+  const bestProfile = calibrationProfile[best.name];
+  const bestProfileShape = bestProfile ? poseSimilarity(hand, bestProfile.template) : 0;
+
+  if (
+    best.name === "DRAW" &&
+    !drawQualified &&
+    !(bestProfile && bestProfileShape >= .78 && generic.find(item => item.name === "DRAW")?.score >= .42)
+  ) {
     return { name: "IDLE", score: best.score, margin: best.score - second.score };
   }
 
-  if (best.name === "DELETE" && !deleteQualified) {
+  if (
+    best.name === "DELETE" &&
+    !deleteQualified &&
+    !(bestProfile && bestProfileShape >= .78 && generic.find(item => item.name === "DELETE")?.score >= .42)
+  ) {
     return { name: "IDLE", score: best.score, margin: best.score - second.score };
   }
 
