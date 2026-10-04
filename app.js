@@ -1,597 +1,3 @@
-import { FilesetResolver, HandLandmarker } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs";
-
-const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm";
-const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
-
-const COLORS = {
-  draw: "#FF4F91",
-  hover: "#D8FF5A",
-  hand: "#29E8D4",
-  handPoint: "#85FFF3",
-  white: "#FFFFFF",
-  delete: "#FF6F91",
-};
-
-const SETTINGS = {
-  detectIntervalMs: 26,
-  lostGraceMs: 110,
-  gestureWindowMs: 300,
-  gestureWindowRatio: .80,
-  gestureWindowMinSamples: 5,
-  gestureReleaseMs: 170,
-  gestureReleaseRatio: .62,
-  drawMaxStartSpeed: 460,
-  pinchStart: 0.47,
-  pinchRelease: 0.62,
-  collisionRadius: 26,
-  hoverExitRadius: 42,
-  deleteHoldMs: 520,
-  drawStartMove: 3.0,
-  drawMinMove: 1.35,
-  resampleStep: 3.0,
-  brushWidth: 3.15,
-  maxParticles: 180,
-};
-
-const CONNECTIONS = [
-  [0,1],[1,2],[2,3],[3,4],
-  [0,5],[5,6],[6,7],[7,8],
-  [5,9],[9,10],[10,11],[11,12],
-  [9,13],[13,14],[14,15],[15,16],
-  [13,17],[17,18],[18,19],[19,20],[0,17]
-];
-
-const video = document.querySelector("#video");
-const stage = document.querySelector("#stage");
-const drawingCanvas = document.querySelector("#drawingCanvas");
-const effectsCanvas = document.querySelector("#effectsCanvas");
-const drawCtx = drawingCanvas.getContext("2d");
-const fxCtx = effectsCanvas.getContext("2d");
-const startScreen = document.querySelector("#startScreen");
-const startButton = document.querySelector("#startButton");
-const startError = document.querySelector("#startError");
-const status = document.querySelector("#status");
-const motionLabel = document.querySelector("#motion");
-
-let landmarker = null;
-let stream = null;
-let running = false;
-let lastVideoTime = -1;
-let lastDetectAt = 0;
-let latestHand = null;
-let latestWorldHand = null;
-let activePoints = [];
-
-class OneEuroFilter {
-  constructor(minCutoff = 1.25, beta = .02, derivativeCutoff = 1.0) {
-    this.minCutoff = minCutoff;
-    this.beta = beta;
-    this.derivativeCutoff = derivativeCutoff;
-    this.prevRaw = null;
-    this.prevFiltered = null;
-    this.prevDerivative = 0;
-    this.prevTime = 0;
-  }
-
-  reset() {
-    this.prevRaw = null;
-    this.prevFiltered = null;
-    this.prevDerivative = 0;
-    this.prevTime = 0;
-  }
-
-  alpha(cutoff, dt) {
-    const tau = 1 / (2 * Math.PI * Math.max(.001, cutoff));
-    return 1 / (1 + tau / Math.max(.001, dt));
-  }
-
-  filter(value, nowMs) {
-    if (this.prevRaw == null || !this.prevFiltered) {
-      this.prevRaw = value;
-      this.prevFiltered = value;
-      this.prevTime = nowMs;
-      return value;
-    }
-
-    const dt = Math.max(.008, Math.min(.12, (nowMs - this.prevTime) / 1000));
-    const rawDerivative = (value - this.prevRaw) / dt;
-    const dAlpha = this.alpha(this.derivativeCutoff, dt);
-    this.prevDerivative =
-      dAlpha * rawDerivative + (1 - dAlpha) * this.prevDerivative;
-
-    const cutoff = this.minCutoff + this.beta * Math.abs(this.prevDerivative);
-    const a = this.alpha(cutoff, dt);
-    const filtered = a * value + (1 - a) * this.prevFiltered;
-
-    this.prevRaw = value;
-    this.prevFiltered = filtered;
-    this.prevTime = nowMs;
-    return filtered;
-  }
-}
-
-function createLandmarkFilterBank() {
-  return Array.from({ length: 21 }, () => ({
-    x: new OneEuroFilter(1.25, .025, 1.0),
-    y: new OneEuroFilter(1.25, .025, 1.0),
-    z: new OneEuroFilter(1.10, .030, 1.0),
-  }));
-}
-
-const imageLandmarkFilters = createLandmarkFilterBank();
-const worldLandmarkFilters = createLandmarkFilterBank();
-
-function resetLandmarkFilters() {
-  for (const bank of [imageLandmarkFilters, worldLandmarkFilters]) {
-    for (const filter of bank) {
-      filter.x.reset();
-      filter.y.reset();
-      filter.z.reset();
-    }
-  }
-}
-
-function smoothLandmarks(points, nowMs, filterBank) {
-  if (!points || points.length !== 21) return null;
-
-  return points.map((point, index) => ({
-    x: filterBank[index].x.filter(point.x, nowMs),
-    y: filterBank[index].y.filter(point.y, nowMs),
-    z: point.z == null
-      ? null
-      : filterBank[index].z.filter(point.z, nowMs),
-  }));
-}
-
-let stableGesture = "IDLE";
-let gestureCandidate = "IDLE";
-let gestureCandidateAt = 0;
-let pinchActive = false;
-
-let rawPoint = null;
-let filteredPoint = null;
-let velocity = { x: 0, y: 0 };
-let lastSampleAt = 0;
-let motionSamples = [];
-let lastCurvature = 0;
-let lastSpeed = 0;
-
-let strokes = [];
-let strokeOffsets = [];
-let strokeBounds = [];
-let currentStroke = null;
-let drawAnchor = null;
-let hoveredStrokeIndex = -1;
-
-let grabbedStrokeIndex = -1;
-let previousGrabPoint = null;
-let canvasPanning = false;
-
-let deleteTarget = -1;
-let deleteStartedAt = 0;
-let deleteConsumed = false;
-
-let panX = 0;
-let panY = 0;
-
-let lastFrameAt = performance.now();
-const particles = [];
-const flashes = [];
-
-function size() {
-  return { width: stage.clientWidth, height: stage.clientHeight };
-}
-
-function resizeCanvas() {
-  const { width, height } = size();
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-
-  for (const canvas of [drawingCanvas, effectsCanvas]) {
-    canvas.width = Math.max(1, Math.round(width * dpr));
-    canvas.height = Math.max(1, Math.round(height * dpr));
-    canvas.style.width = width + "px";
-    canvas.style.height = height + "px";
-  }
-
-  drawCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  fxCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  drawCtx.lineCap = "round";
-  drawCtx.lineJoin = "round";
-  fxCtx.lineCap = "round";
-  fxCtx.lineJoin = "round";
-  redraw();
-}
-
-function displayPoint(x, y) {
-  const { width, height } = size();
-  const vw = video.videoWidth || 16;
-  const vh = video.videoHeight || 9;
-  const scale = Math.max(width / vw, height / vh);
-  const renderedW = vw * scale;
-  const renderedH = vh * scale;
-  const cropX = (renderedW - width) / 2;
-  const cropY = (renderedH - height) / 2;
-
-  return {
-    x: width - (x * renderedW - cropX),
-    y: y * renderedH - cropY,
-  };
-}
-
-function midpoint(a, b) {
-  return { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
-}
-
-function dist(a, b) {
-  const dz = (a.z != null && b.z != null) ? a.z - b.z : 0;
-  return Math.hypot(a.x - b.x, a.y - b.y, dz);
-}
-
-function jointAngle(a, b, c) {
-  const abx = a.x - b.x;
-  const aby = a.y - b.y;
-  const abz = (a.z || 0) - (b.z || 0);
-  const cbx = c.x - b.x;
-  const cby = c.y - b.y;
-  const cbz = (c.z || 0) - (b.z || 0);
-  const denom = Math.hypot(abx, aby, abz) * Math.hypot(cbx, cby, cbz);
-  if (!denom) return 0;
-  return Math.acos(Math.max(-1, Math.min(1, (abx * cbx + aby * cby + abz * cbz) / denom))) * 180 / Math.PI;
-}
-
-function clamp01(value) {
-  return Math.max(0, Math.min(1, value));
-}
-
-
-function sub3(a, b) {
-  return { x: a.x - b.x, y: a.y - b.y, z: (a.z || 0) - (b.z || 0) };
-}
-
-function add3(a, b) {
-  return { x: a.x + b.x, y: a.y + b.y, z: (a.z || 0) + (b.z || 0) };
-}
-
-function mul3(v, scalar) {
-  return { x: v.x * scalar, y: v.y * scalar, z: (v.z || 0) * scalar };
-}
-
-function dot3(a, b) {
-  return a.x * b.x + a.y * b.y + (a.z || 0) * (b.z || 0);
-}
-
-function cross3(a, b) {
-  return {
-    x: a.y * (b.z || 0) - (a.z || 0) * b.y,
-    y: a.z * b.x - a.x * (b.z || 0),
-    z: a.x * b.y - a.y * b.x,
-  };
-}
-
-function norm3(v) {
-  return Math.hypot(v.x, v.y, v.z || 0);
-}
-
-function normalize3(v) {
-  const length = norm3(v);
-  return length > 1e-6 ? mul3(v, 1 / length) : { x: 0, y: 0, z: 0 };
-}
-
-function fingerGeometry(hand, mcp, pip, dip, tip) {
-  const palm = Math.max(.0001, dist(hand[0], hand[9]));
-  const direct = dist(hand[mcp], hand[tip]);
-  const chain =
-    dist(hand[mcp], hand[pip]) +
-    dist(hand[pip], hand[dip]) +
-    dist(hand[dip], hand[tip]);
-
-  const straightness = chain ? direct / chain : 0;
-  const wristReach = dist(hand[0], hand[tip]) / palm;
-  const pipA = jointAngle(hand[mcp], hand[pip], hand[dip]);
-  const dipA = jointAngle(hand[pip], hand[dip], hand[tip]);
-
-  const pipExtended = clamp01((pipA - 138) / 34);
-  const dipExtended = clamp01((dipA - 140) / 32);
-  const reachExtended = clamp01((wristReach - .95) / .78);
-  const straightExtended = clamp01((straightness - .76) / .18);
-
-  const extended = (
-    pipExtended * .34 +
-    dipExtended * .28 +
-    reachExtended * .22 +
-    straightExtended * .16
-  );
-
-  const pipCurled = clamp01((146 - pipA) / 48);
-  const dipCurled = clamp01((150 - dipA) / 45);
-  const reachCurled = clamp01((1.55 - wristReach) / .70);
-
-  const curled = (
-    pipCurled * .43 +
-    dipCurled * .32 +
-    reachCurled * .25
-  );
-
-  return {
-    extended: clamp01(extended),
-    curled: clamp01(curled),
-    pip: pipA,
-    dip: dipA,
-    reach: wristReach,
-  };
-}
-
-function fingerFlags(hand) {
-  const fingers = {
-    index: fingerGeometry(hand, 5, 6, 7, 8),
-    middle: fingerGeometry(hand, 9, 10, 11, 12),
-    ring: fingerGeometry(hand, 13, 14, 15, 16),
-    pinky: fingerGeometry(hand, 17, 18, 19, 20),
-  };
-
-  const palm = Math.max(.0001, dist(hand[0], hand[9]));
-  const thumbReach = dist(hand[0], hand[4]) / palm;
-  const thumbOpen = clamp01((thumbReach - .72) / .62);
-
-  return {
-    thumb: thumbOpen,
-    ...fingers,
-  };
-}
-
-function pinchRatio(hand) {
-  return dist(hand[4], hand[8]) / Math.max(.0001, dist(hand[0], hand[9]));
-}
-
-function palmOrientationScore(hand) {
-  if (!hand || hand.length !== 21) return 0;
-
-  const across = normalize3(sub3(hand[17], hand[5]));
-  const towardMiddle = normalize3(sub3(hand[9], hand[0]));
-  const normal = normalize3(cross3(across, towardMiddle));
-  if (!norm3(normal)) return 0;
-
-  // MediaPipe world landmarks are used for depth-aware geometry. We care
-  // about the magnitude of the palm normal along the camera/depth axis;
-  // either normal direction is valid because the hand may be mirrored.
-  return clamp01(Math.abs(dot3(normal, { x: 0, y: 0, z: 1 })));
-}
-
-function angleBendScore(angle, openAngle = 170, bendAngle = 105) {
-  return clamp01((openAngle - angle) / (openAngle - bendAngle));
-}
-
-function pinchConfidence(hand) {
-  const ratio = pinchRatio(hand);
-  const tipScore = clamp01((.62 - ratio) / .24);
-
-  const thumbAngle = jointAngle(hand[2], hand[3], hand[4]);
-  const indexPipAngle = jointAngle(hand[5], hand[6], hand[7]);
-  const indexDipAngle = jointAngle(hand[6], hand[7], hand[8]);
-
-  const thumbBend = angleBendScore(thumbAngle, 164, 112);
-  const indexBend = angleBendScore(indexPipAngle, 175, 115);
-  const indexDipBend = angleBendScore(indexDipAngle, 174, 122);
-  const orientation = palmOrientationScore(hand);
-
-  // Tip distance alone is not enough. A valid pinch needs the thumb/index
-  // chains to be approaching each other, plus a plausible palm orientation.
-  const geometryScore =
-    thumbBend * .34 +
-    indexBend * .28 +
-    indexDipBend * .16 +
-    orientation * .22;
-
-  if (orientation < .22 || thumbBend < .08 || indexBend < .08) {
-    return clamp01(tipScore * .38);
-  }
-
-  return clamp01(tipScore * (.58 + geometryScore * .42));
-}
-
-function classifyGesture(hand, motionSpeed = indexSpeed) {
-  const f = fingerFlags(hand);
-  const pinch = pinchConfidence(hand);
-
-  const otherExtendedForIndex = Math.max(
-    f.middle.extended,
-    f.ring.extended,
-    f.pinky.extended
-  );
-
-  const otherExtendedForPinky = Math.max(
-    f.index.extended,
-    f.middle.extended,
-    f.ring.extended
-  );
-
-  const drawScore = Math.min(
-    f.index.extended,
-    f.middle.curled,
-    f.ring.curled,
-    f.pinky.curled
-  ) * (1 - pinch * .95);
-
-  const deleteScore = Math.min(
-    f.pinky.extended,
-    f.index.curled,
-    f.middle.curled,
-    f.ring.curled
-  ) * (1 - pinch * .95);
-
-  const trackScore = Math.min(
-    f.thumb,
-    f.index.extended,
-    f.middle.extended,
-    f.ring.extended,
-    f.pinky.extended
-  ) * (1 - pinch);
-
-  const drawQualified =
-    f.index.extended >= .62 &&
-    f.index.extended - otherExtendedForIndex >= .10 &&
-    f.middle.curled >= .46 &&
-    f.ring.curled >= .46 &&
-    f.pinky.curled >= .46;
-
-  const deleteQualified =
-    f.pinky.extended >= .64 &&
-    f.pinky.extended - otherExtendedForPinky >= .12 &&
-    f.index.curled >= .52 &&
-    f.middle.curled >= .52 &&
-    f.ring.curled >= .52 &&
-    f.thumb <= .62;
-
-  const ranked = [
-    { name: "GRAB", score: pinch },
-    { name: "DRAW", score: drawQualified ? Math.max(drawScore, .64) : drawScore },
-    { name: "DELETE", score: deleteQualified ? Math.max(deleteScore, .64) : deleteScore },
-    { name: "TRACK", score: trackScore },
-  ].sort((a, b) => b.score - a.score);
-
-  const best = ranked[0];
-  const second = ranked[1];
-
-  if (best.name === "GRAB" && best.score >= .62) {
-    return { name: "GRAB", score: best.score, margin: best.score - second.score };
-  }
-
-  if (best.score < .56) {
-    return { name: "IDLE", score: best.score, margin: best.score };
-  }
-
-  if (best.score - second.score < .13) {
-    return { name: "IDLE", score: best.score, margin: best.score - second.score };
-  }
-
-  if (
-    best.name === "DRAW" &&
-    motionSpeed > SETTINGS.drawMaxStartSpeed &&
-    stableGesture !== "DRAW"
-  ) {
-    return {
-      name: "IDLE",
-      score: best.score,
-      margin: best.score - second.score,
-    };
-  }
-
-  if (best.name === "DRAW" && !drawQualified) {
-    return { name: "IDLE", score: best.score, margin: best.score - second.score };
-  }
-
-  if (best.name === "DELETE" && !deleteQualified) {
-    return { name: "IDLE", score: best.score, margin: best.score - second.score };
-  }
-
-  return { name: best.name, score: best.score, margin: best.score - second.score };
-}
-let gestureEvidence = [];
-
-function recordGestureEvidence(result, now) {
-  gestureEvidence.push({
-    name: result.name,
-    score: result.score,
-    margin: result.margin,
-    t: now,
-  });
-
-  while (
-    gestureEvidence.length &&
-    now - gestureEvidence[0].t > SETTINGS.gestureWindowMs
-  ) {
-    gestureEvidence.shift();
-  }
-}
-
-function gestureWindowPass(target, now, ratio = SETTINGS.gestureWindowRatio) {
-  const window = gestureEvidence.filter(sample => now - sample.t <= SETTINGS.gestureWindowMs);
-  if (window.length < SETTINGS.gestureWindowMinSamples) return false;
-
-  const qualifying = window.filter(
-    sample =>
-      sample.name === target &&
-      sample.score >= .60 &&
-      sample.margin >= .10
-  );
-
-  return qualifying.length / window.length >= ratio;
-}
-
-function commitGesture(result, now) {
-  recordGestureEvidence(result, now);
-
-  const next = result.name;
-  const confidence = result.score;
-
-  if (next === stableGesture) {
-    gestureCandidate = next;
-    gestureCandidateAt = now;
-    return;
-  }
-
-  if (next !== gestureCandidate) {
-    gestureCandidate = next;
-    gestureCandidateAt = now;
-  }
-
-  if (next !== "IDLE") {
-    // Entry requires a real temporal majority, not a single good frame.
-    if (!gestureWindowPass(next, now)) return;
-
-    const requiredHold =
-      next === "GRAB" && confidence > .82 ? 44 :
-      confidence > .78 ? 58 :
-      82;
-
-    if (now - gestureCandidateAt >= requiredHold) {
-      const previous = stableGesture;
-      stableGesture = next;
-      onGestureChanged(previous, next);
-      gestureEvidence = [];
-    }
-    return;
-  }
-
-  // Release is also buffered so a one-frame landmark wobble does not break a
-  // drawing stroke. Any strong competing gesture uses its own 300ms window.
-  const recent = gestureEvidence.filter(
-    sample => now - sample.t <= SETTINGS.gestureReleaseMs
-  );
-  const nonGesture = recent.filter(sample => sample.name === "IDLE").length;
-  const releaseReady =
-    recent.length >= 4 &&
-    nonGesture / recent.length >= SETTINGS.gestureReleaseRatio;
-
-  if (
-    stableGesture !== "IDLE" &&
-    releaseReady &&
-    now - gestureCandidateAt >= SETTINGS.gestureReleaseMs
-  ) {
-    const previous = stableGesture;
-    stableGesture = "IDLE";
-    onGestureChanged(previous, "IDLE");
-    gestureEvidence = [];
-  }
-}
-
-let indexSpeed = 0;
-let indexSpeedPoint = null;
-let indexSpeedAt = 0;
-
-function resetMotionFilter() {
-  rawPoint = null;
-  filteredPoint = null;
-  velocity = { x: 0, y: 0 };
-  lastSampleAt = 0;
-  motionSamples = [];
-  lastCurvature = 0;
-  lastSpeed = 0;
-  indexSpeed = 0;
-  indexSpeedPoint = null;
-  indexSpeedAt = 0;
-}
-
 function updateIndexSpeed(point, now) {
   if (!point) {
     indexSpeed = 0;
@@ -608,79 +14,44 @@ function updateIndexSpeed(point, now) {
   }
 
   const dt = Math.max(.01, Math.min(.12, (now - indexSpeedAt) / 1000));
-  const raw = Math.hypot(point.x - indexSpeedPoint.x, point.y - indexSpeedPoint.y) / dt;
+  const raw = Math.hypot(
+    point.x - indexSpeedPoint.x,
+    point.y - indexSpeedPoint.y
+  ) / dt;
+
   indexSpeed = indexSpeed * .72 + raw * .28;
   indexSpeedPoint = { ...point };
   indexSpeedAt = now;
   return indexSpeed;
 }
 
-function onGestureChanged(prev, next) {
-  if (prev === "DRAW" && next !== "DRAW") stopStroke();
-
-  if (prev === "GRAB" && next !== "GRAB") {
-    grabbedStrokeIndex = -1;
-    previousGrabPoint = null;
-    canvasPanning = false;
+function updateIndexWorldSpeed(hand, now) {
+  const point = hand?.[8];
+  if (!point) {
+    indexWorldSpeed = 0;
+    indexWorldPoint = null;
+    indexWorldAt = 0;
+    return 0;
   }
 
-  if (next === "DRAW") {
-    grabbedStrokeIndex = -1;
-    previousGrabPoint = null;
-    canvasPanning = false;
-    deleteTarget = -1;
-    deleteStartedAt = 0;
-    deleteConsumed = false;
-    drawAnchor = filteredPoint ? { ...filteredPoint } : null;
-    currentStroke = null;
+  if (!indexWorldPoint) {
+    indexWorldPoint = { ...point };
+    indexWorldAt = now;
+    indexWorldSpeed = 0;
+    return 0;
   }
 
-  if (next === "GRAB") {
-    const pinchPoint = latestHand
-      ? midpoint(activePoints[4], activePoints[8])
-      : filteredPoint;
+  const dt = Math.max(.01, Math.min(.12, (now - indexWorldAt) / 1000));
+  const scale = palmScale(hand);
+  const raw = dist(point, indexWorldPoint) / Math.max(.0001, scale * dt);
 
-    const grabPoints = latestHand
-      ? [pinchPoint, activePoints[4], activePoints[8]].filter(Boolean)
-      : [];
-
-    grabbedStrokeIndex = findHoveredStroke(grabPoints, SETTINGS.collisionRadius * 1.55);
-    canvasPanning = grabbedStrokeIndex < 0;
-    previousGrabPoint = pinchPoint ? { ...pinchPoint } : null;
-
-    deleteTarget = -1;
-    deleteStartedAt = 0;
-    deleteConsumed = false;
-    resetMotionFilter();
-    if (pinchPoint) filteredPoint = { ...pinchPoint };
-  }
-
-  if (next === "DELETE") {
-    stopStroke();
-    grabbedStrokeIndex = -1;
-    previousGrabPoint = null;
-    canvasPanning = false;
-
-    // Only the pinky fingertip can select the target.
-    // No other part of the hand participates in delete targeting.
-    const pinkyPoint = activePoints[20];
-    deleteTarget = pinkyPoint
-      ? findHoveredStroke(
-          [pinkyPoint],
-          SETTINGS.collisionRadius * 1.2
-        )
-      : -1;
-    deleteStartedAt = deleteTarget >= 0 ? performance.now() : 0;
-    deleteConsumed = false;
-    resetMotionFilter();
-  }
-
-  if (next !== "DELETE") {
-    deleteTarget = -1;
-    deleteStartedAt = 0;
-    deleteConsumed = false;
-  }
+  indexWorldSpeed = indexWorldSpeed * .72 + raw * .28;
+  indexWorldPoint = { ...point };
+  indexWorldAt = now;
+  return indexWorldSpeed;
 }
+
+
 
 function estimateKinematics(point, now) {
   if (!rawPoint) {
@@ -1003,7 +374,7 @@ function drawHand(points) {
 }
 
 function drawDeletePreview() {
-  if (stableGesture !== "DELETE" || deleteTarget < 0 || !deleteStartedAt || deleteConsumed) return;
+  if (currentState !== "DELETE" || deleteTarget < 0 || !deleteStartedAt || deleteConsumed) return;
 
   const b = strokeBounds[deleteTarget];
   if (!b) return;
@@ -1203,10 +574,10 @@ function updateInteraction(now) {
     updateIndexSpeed(indexPoint, now);
     const pinchPoint = midpoint(activePoints[4], activePoints[8]);
 
-    if (stableGesture === "GRAB") {
+    if (currentState === "GRAB") {
       point = naturalFilter(pinchPoint, now, "GRAB");
       handleGrab(point);
-    } else if (stableGesture === "DRAW") {
+    } else if (currentState === "DRAW") {
       point = naturalFilter(indexPoint, now, "DRAW");
       handleDrawing(point);
     }
@@ -1216,22 +587,22 @@ function updateInteraction(now) {
   }
 
   if (latestHand) {
-    commitGesture(
-      classifyGesture(latestWorldHand || latestHand, indexSpeed),
+    updateGestureState(
+      classifyGesture(latestWorldHand || latestHand, indexWorldSpeed),
       now
     );
   } else if (now - lastSampleAt > SETTINGS.lostGraceMs) {
-    stableGesture = "IDLE";
-    gestureCandidate = "IDLE";
+    currentState = "IDLE";
+    _removedGestureCandidate = "IDLE";
     grabbedStrokeIndex = -1;
     previousGrabPoint = null;
     deleteTarget = -1;
   }
 
   const hoverPoints =
-    stableGesture === "GRAB"
+    currentState === "GRAB"
       ? [activePoints[4], activePoints[8], midpoint(activePoints[4], activePoints[8])].filter(Boolean)
-      : stableGesture === "DELETE"
+      : currentState === "DELETE"
         ? [activePoints[20]].filter(Boolean)
         : activePoints;
 
@@ -1241,7 +612,7 @@ function updateInteraction(now) {
 
   hoveredStrokeIndex = findHoveredStroke(hoverPoints, radius);
 
-  if (stableGesture === "DELETE") {
+  if (currentState === "DELETE") {
     // Pinky mode locks to one hovered stroke. Never call clearAll here.
     if (deleteTarget < 0 && hoveredStrokeIndex >= 0) {
       deleteTarget = hoveredStrokeIndex;
@@ -1258,7 +629,7 @@ function updateInteraction(now) {
     DELETE: deleteTarget >= 0 ? "PINKY · SELECT / DELETE" : "PINKY · TARGET A STROKE",
   };
 
-  status.textContent = running ? labels[stableGesture] : "CAMERA OFF";
+  status.textContent = running ? labels[currentState] : "CAMERA OFF";
   motionLabel.textContent = running
     ? "HAND MOTION · speed " + Math.round(lastSpeed) + " · curvature " + lastCurvature.toFixed(2)
     : "HAND MOTION · READY";
@@ -1281,6 +652,8 @@ function processVideo(now) {
       latestWorldHand = rawWorldHand
         ? smoothLandmarks(rawWorldHand, now, worldLandmarkFilters)
         : null;
+
+      updateIndexWorldSpeed(latestWorldHand, now);
     } else {
       latestHand = null;
       latestWorldHand = null;
@@ -1357,7 +730,6 @@ async function start() {
     running = true;
     startScreen.classList.add("hidden");
     resetLandmarkFilters();
-    gestureEvidence = [];
     resetMotionFilter();
     resizeCanvas();
   } catch (error) {
