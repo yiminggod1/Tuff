@@ -925,7 +925,10 @@ function handleGrab(point) {
 function handleDelete(now) {
   if (deleteTarget < 0) return;
 
-  const stillOver = findHoveredStroke(activePoints, SETTINGS.collisionRadius * 1.22);
+  const pinkyPoint = activePoints[20];
+  const stillOver = pinkyPoint
+    ? findHoveredStroke([pinkyPoint], SETTINGS.collisionRadius * 1.22)
+    : -1;
 
   if (stillOver !== deleteTarget) {
     deleteTarget = stillOver;
