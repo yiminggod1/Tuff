@@ -83,7 +83,7 @@ let latestWorldHand = null;
 let activePoints = [];
 
 class OneEuroFilter {
-  constructor(minCutoff = 1.25, beta = .02, derivativeCutoff = 1.0) {
+  constructor(minCutoff = .30, beta = .007, derivativeCutoff = 1.0) {
     this.minCutoff = minCutoff;
     this.beta = beta;
     this.derivativeCutoff = derivativeCutoff;
@@ -486,20 +486,25 @@ function classifyGesture(hand, motionSpeed = indexWorldSpeed) {
     f.ring.extended
   );
 
+  const indexFolded = fingerFoldbackScore(hand, 5, 6, 7, 8);
+  const middleFolded = fingerFoldbackScore(hand, 9, 10, 11, 12);
+  const ringFolded = fingerFoldbackScore(hand, 13, 14, 15, 16);
+  const pinkyFolded = fingerFoldbackScore(hand, 17, 18, 19, 20);
+
   const drawQualified =
     f.index.extended >= .72 &&
     f.index.extended - otherExtendedForIndex >= .12 &&
-    f.middle.curled >= .55 &&
-    f.ring.curled >= .55 &&
-    f.pinky.curled >= .55 &&
+    middleFolded >= .58 &&
+    ringFolded >= .58 &&
+    pinkyFolded >= .58 &&
     pinch < .34;
 
   const deleteQualified =
     f.pinky.extended >= .72 &&
     f.pinky.extended - otherExtendedForPinky >= .14 &&
-    f.index.curled >= .58 &&
-    f.middle.curled >= .58 &&
-    f.ring.curled >= .58 &&
+    indexFolded >= .62 &&
+    middleFolded >= .62 &&
+    ringFolded >= .62 &&
     f.thumb <= .52 &&
     pinch < .20;
 
@@ -558,8 +563,9 @@ function classifyGesture(hand, motionSpeed = indexWorldSpeed) {
 }
 let gestureWindow = [];
 
-function windowRatio(target) {
-  if (gestureWindow.length < SETTINGS.gestureMinFrames) return 0;
+function windowRatio(target, requireFullWindow = false) {
+  if (!gestureWindow.length) return 0;
+  if (requireFullWindow && gestureWindow.length < SETTINGS.gestureMinFrames) return 0;
 
   let matched = 0;
   for (const sample of gestureWindow) {
@@ -669,17 +675,17 @@ function updateGestureState(result, now) {
       ? SETTINGS.sideOnEnterRatio
       : SETTINGS.gestureEnterRatio;
 
-    if (windowRatio(result.name) >= entryRatio) {
+    if (windowRatio(result.name, true) >= entryRatio) {
       currentState = result.name;
       onStart(currentState);
-      gestureWindow = [];
+      // 保留已通過的 15-frame 證據，讓下一幀不會因窗口重置而誤釋放。
     }
 
     return;
   }
 
   // Schmitt-style maintain gate: once active, only <30% releases it.
-  if (windowRatio(currentState) < SETTINGS.gestureMaintainRatio) {
+  if (windowRatio(currentState, false) < SETTINGS.gestureMaintainRatio) {
     const ended = currentState;
     onEnd(ended);
     currentState = "IDLE";
@@ -1357,12 +1363,17 @@ function processVideo(now) {
     const rawImageHand = result.landmarks?.[0] || null;
     const rawWorldHand = result.worldLandmarks?.[0] || rawImageHand;
 
-    if (rawImageHand && rawWorldHand) {
+    if (rawImageHand) {
       latestHand = smoothLandmarks(rawImageHand, now, imageLandmarkFilters);
-      latestWorldHand = smoothLandmarks(rawWorldHand, now, worldLandmarkFilters);
+      latestWorldHand = rawWorldHand
+        ? smoothLandmarks(rawWorldHand, now, worldLandmarkFilters)
+        : null;
+
+      updateIndexWorldSpeed(latestWorldHand, now);
     } else {
       latestHand = null;
       latestWorldHand = null;
+      updateIndexWorldSpeed(null, now);
       resetLandmarkFilters();
     }
   } catch (error) {
