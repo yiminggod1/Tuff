@@ -16,21 +16,29 @@ Pinky deletion is intentionally target-scoped: it can remove one hovered stroke 
 
 ## Motion model
 
-The pointer is not treated as a raw mouse cursor. It uses adaptive filtering driven by estimated fingertip speed and local path curvature. Slow micro-movements are attenuated while intentional fast movement receives a faster response. Tight turns receive slightly more damping, reflecting the documented speed–curvature relationship in human drawing movements.
+Gesture geometry is computed from MediaPipe World Landmarks when available.
 
-Captured samples are resampled for stable spacing and rendered as continuous Bézier segments. Gesture geometry uses MediaPipe 3D world landmarks when available, while the on-screen cursor uses mirrored image coordinates.
+### Industrial anti-false-trigger pipeline
 
-## Anti-false-trigger pipeline
+1. **Dynamic PalmScale normalization** — PalmScale is the 3D distance from wrist landmark 0 to middle-finger MCP landmark 9. Gesture distance thresholds are expressed as ratios of PalmScale rather than fixed hand-size distances.
+2. **1€ filtering** — every X/Y/Z axis has an independent filter; the World Landmark bank uses `minCutoff = 0.30` and `beta = 0.007` for strong stationary jitter suppression with adaptive high-speed response.
+3. **Palm normal compensation** — the normal from landmarks 0/5/17 estimates palm orientation. When the hand is side-on, Pinch uses a tighter PalmScale threshold and gesture entry requires 92% temporal agreement instead of 85%.
+4. **Multi-finger coupling** — Pinch requires thumb/index bending plus middle/ring/pinky foldback; Pinky delete requires pinky dominance while the other fingers are explicitly folded; Index draw requires index dominance and the other three long fingers folded.
+5. **15-frame Schmitt state machine** — entering a gesture requires at least 85% of the last 15 frames to agree (92% side-on). Once active, the gesture is held until its 15-frame agreement falls below 30%, then `onEnd()` is fired.
+6. **Motion gate** — a new DRAW state is rejected while the index fingertip is moving faster than the configured PalmScale-per-second threshold. Once DRAW is active, intentional fast drawing remains responsive.
 
-1. **1€ landmark filtering** smooths the 21 image/world landmark streams before geometry is evaluated.
-2. **300 ms temporal voting** requires at least 5 observations and an 80% qualifying majority before entering a gesture.
-3. **Buffered release** prevents a single noisy frame from dropping an active gesture.
-4. **Draw speed gate** blocks a new DRAW activation while the index fingertip is moving too fast; once drawing is already engaged, normal intentional motion is allowed.
-5. **Pinch geometry** combines 3D tip distance, thumb/index joint bending, and palm-normal orientation.
-6. **Pinky geometry** requires the pinky to dominate while index/middle/ring are curled and the thumb is not in an open-palm state.
+### Tuning guide
 
-These gates are deliberately redundant: a frame must survive filtering, temporal consistency, anatomy, and motion checks before it can trigger an action.
+- `worldFilterMinCutoff`: lower = smoother at rest, higher = less latency.
+- `worldFilterBeta`: higher = more responsive at speed, lower = more damping.
+- `gestureEnterRatio`: higher = fewer false entries, but more deliberate gestures.
+- `gestureMaintainRatio`: lower = stronger hold hysteresis; higher = faster release.
+- `sideOnEnterRatio`: higher = safer when palm orientation is ambiguous.
+- `pinchMaxPalmRatio`: lower = harder to pinch accidentally.
+- `pinchSideOnPalmRatio`: lower = extra protection for side-on hands.
+- `drawMaxStartPalmSpeeds`: lower = harder to enter DRAW while repositioning quickly.
 
+Captured samples are resampled for stable spacing and rendered as continuous Bézier segments. Slow micro-movements are damped while intentional motion receives lower latency.
 ## Stack
 
 - HTML / CSS / JavaScript
