@@ -138,7 +138,7 @@ function smoothLandmarks(points, nowMs, filterBank) {
     x: filterBank[index].x.filter(point.x, nowMs),
     y: filterBank[index].y.filter(point.y, nowMs),
     z: point.z == null
-      ? 0
+      ? null
       : filterBank[index].z.filter(point.z, nowMs),
   }));
 }
@@ -2025,11 +2025,13 @@ function processVideo(now) {
   try {
     const result = landmarker.detectForVideo(video, now);
     const rawImageHand = result.landmarks?.[0] || null;
-    const rawWorldHand = result.worldLandmarks?.[0] || rawImageHand;
+    const rawWorldHand = result.worldLandmarks?.[0] || null;
 
-    if (rawImageHand && rawWorldHand) {
+    if (rawImageHand) {
       latestHand = smoothLandmarks(rawImageHand, now, imageLandmarkFilters);
-      latestWorldHand = smoothLandmarks(rawWorldHand, now, worldLandmarkFilters);
+      latestWorldHand = rawWorldHand
+        ? smoothLandmarks(rawWorldHand, now, worldLandmarkFilters)
+        : null;
     } else {
       latestHand = null;
       latestWorldHand = null;
