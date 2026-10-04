@@ -1043,19 +1043,6 @@ async function start() {
   }
 }
 
-function clearAll() {
-  strokes = [];
-  strokeOffsets = [];
-  strokeBounds = [];
-  currentStroke = null;
-  hoveredStrokeIndex = -1;
-  grabbedStrokeIndex = -1;
-  deleteTarget = -1;
-  panX = 0;
-  panY = 0;
-  redraw();
-}
-
 function savePng() {
   const { width, height } = size();
   const out = document.createElement("canvas");
@@ -1083,7 +1070,6 @@ startButton.addEventListener("click", start);
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("keydown", event => {
   const key = event.key.toLowerCase();
-  if (key === "c") clearAll();
   if (key === "s") savePng();
 });
 window.addEventListener("beforeunload", () => {
