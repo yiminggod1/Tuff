@@ -79,6 +79,7 @@ const checkPersonal = document.querySelector("#checkPersonal");
 let calibrationActive = false;
 let calibrationIndex = 0;
 let calibrationHoldStarted = 0;
+let calibrationConfirmedUntil = 0;
 let calibrationSamples = [];
 let calibrationRecentPoses = [];
 let calibrationRecentScales = [];
@@ -1371,7 +1372,44 @@ function updateCalibration(now) {
   const step = calibrationSteps[calibrationIndex];
   if (!step) return;
 
-  setupCalibrationPoseGuide(step);
+  if (calibrationConfirmedUntil) {
+    if (now < calibrationConfirmedUntil) {
+      drawCalibrationCameraGuide(latestHand);
+      draw3DPreview(latestWorldHand);
+      calibrationConfirm.textContent = "✓ CONFIRMED";
+      calibrationConfirm.classList.add("good");
+      calibrationConfirm.classList.remove("bad");
+      calibrationFeedback.textContent =
+        calibrationIndex === calibrationSteps.length - 1
+          ? "Final hand profile captured. Starting the canvas next."
+          : "Pose captured. Next step is ready.";
+      calibrationStep.textContent =
+        "CONFIRMED · STEP " + (calibrationIndex + 1) + " / " + calibrationSteps.length;
+      calibrationMeterFill.style.width = "100%";
+      return;
+    }
+
+    calibrationConfirmedUntil = 0;
+    calibrationIndex += 1;
+    calibrationHoldStarted = 0;
+    calibrationConfirmedUntil = 0;
+    calibrationSamples = [];
+    calibrationRecentPoses = [];
+    calibrationRecentScales = [];
+
+    if (calibrationIndex >= calibrationSteps.length) {
+      calibrationActive = false;
+      stage.classList.remove("calibrating");
+      calibrationScreen?.classList.add("hidden");
+      stableGesture = "IDLE";
+      gestureCandidate = "IDLE";
+      gestureCandidateAt = now;
+      resetMotionFilter();
+      return;
+    }
+  }
+
+  setupCalibrationPoseGuide(calibrationSteps[calibrationIndex]);
   drawCalibrationCameraGuide(latestHand);
   draw3DPreview(latestWorldHand);
 
@@ -1475,23 +1513,16 @@ function updateCalibration(now) {
     calibrationFeedback.textContent = "Confirmed when the bar reaches 100%. Keep the same pose.";
   }
 
-  if (progress >= 1) {
+  if (progress >= 1 && !calibrationConfirmedUntil) {
     learnCalibrationProfile(step.gesture);
-    calibrationIndex += 1;
-    calibrationHoldStarted = 0;
-    calibrationSamples = [];
-    calibrationRecentPoses = [];
-    calibrationRecentScales = [];
-
-    if (calibrationIndex >= calibrationSteps.length) {
-      calibrationActive = false;
-      stage.classList.remove("calibrating");
-      calibrationScreen?.classList.add("hidden");
-      stableGesture = "IDLE";
-      gestureCandidate = "IDLE";
-      gestureCandidateAt = now;
-      resetMotionFilter();
-    }
+    calibrationConfirmedUntil = now + 650;
+    calibrationConfirm.textContent = "✓ CONFIRMED";
+    calibrationConfirm.classList.add("good");
+    calibrationConfirm.classList.remove("bad");
+    calibrationFeedback.textContent =
+      calibrationIndex === calibrationSteps.length - 1
+        ? "Final pose saved. Your personal 3D profile is ready."
+        : "This gesture is saved. The next instruction will appear immediately.";
   }
 }
 
